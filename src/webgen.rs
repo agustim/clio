@@ -267,6 +267,16 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .sent.neutral  { color: var(--neu); } .sent.neutral  .dot { background: var(--neu); }
 .sent.negative { color: var(--neg); } .sent.negative .dot { background: var(--neg); }
 
+/* ---- Deep pass ---- */
+.codestats { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; font-size: .76rem; color: var(--muted); }
+.codestats .langs { display: flex; flex-wrap: wrap; gap: .35rem; }
+.codestats .lang { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: .1rem .4rem; }
+.codestats .lang i { color: var(--accent); font-style: normal; }
+.deep { border-top: 1px dashed var(--border); padding-top: .5rem; font-size: .85rem; }
+.deep summary { cursor: pointer; color: var(--accent); font-weight: 500; user-select: none; }
+.deep p { color: var(--muted); line-height: 1.5; margin: .5rem 0 0; }
+.deep-pending { font-size: .76rem; color: var(--faint); font-style: italic; }
+
 .empty { grid-column: 1/-1; text-align: center; color: var(--muted); padding: 3rem 1rem; font-size: .95rem; }
 
 .footer { text-align: center; color: var(--muted); padding: 2rem; font-size: .82rem; border-top: 1px solid var(--border); }
@@ -317,6 +327,30 @@ function buildFilters() {
 
 const SENT_LABEL = { positive: 'Positiu', neutral: 'Neutral', negative: 'Negatiu' };
 
+// Bloc de la segona passada (deep): anàlisi profunda + stats de codi.
+function deepBlock(l) {
+  const parts = [];
+  const cs = l.code_stats;
+  if (cs && typeof cs === 'object') {
+    const langs = (cs.top_languages || []).slice(0,4)
+      .map(x => `<span class="lang">${esc(x.lang)} <i>${x.loc}</i></span>`).join('');
+    parts.push(`<div class="codestats">
+      <span title="Fitxers de codi">📄 ${cs.files||0}</span>
+      <span title="Línies de codi">⌁ ${cs.loc||0} LOC</span>
+      <span class="langs">${langs}</span>
+    </div>`);
+  }
+  if (l.deep_summary && l.deep_status === 'done') {
+    parts.push(`<details class="deep">
+      <summary>🔬 Anàlisi profunda</summary>
+      <p>${esc(l.deep_summary)}</p>
+    </details>`);
+  } else if (l.deep_status === 'pending' || l.deep_status === 'processing') {
+    parts.push(`<div class="deep-pending">🔬 Anàlisi profunda en curs…</div>`);
+  }
+  return parts.join('');
+}
+
 function render() {
   const q = $('search').value.trim().toLowerCase();
   const typeF = $('type-filter').value;
@@ -347,6 +381,7 @@ function render() {
       </div>
       <p class="summary">${esc(l.summary || 'Sense resum disponible.')}</p>
       <div class="tags">${tags}</div>
+      ${deepBlock(l)}
       <div class="meta">
         <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
         <span title="Reporters">👥 ${reporters}</span>

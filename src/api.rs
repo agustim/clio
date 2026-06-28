@@ -48,7 +48,7 @@ async fn create_link(
     let user = auth(&state, &headers, body.token.as_deref()).await?;
     let outcome = state.report_link(&user, &body.url).await?;
     if outcome.needs_processing {
-        state.spawn_pipeline(outcome.link_id);
+        state.enqueue(outcome.link_id);
     }
     Ok(Json(json!({
         "link_id": outcome.link_id,

@@ -39,9 +39,13 @@ pub enum Cmd {
     Push,
 }
 
-pub async fn run(state: AppState, cmd: Cmd) -> Result<()> {
+pub async fn run(
+    state: AppState,
+    rx: tokio::sync::mpsc::Receiver<crate::queue::Job>,
+    cmd: Cmd,
+) -> Result<()> {
     match cmd {
-        Cmd::Serve => serve(state).await,
+        Cmd::Serve => serve(state, rx).await,
         Cmd::UserAdd { username, admin } => {
             let role = if admin { UserRole::Admin } else { UserRole::User };
             let user = state.db.create_user(&username, role).await?;
@@ -64,20 +68,29 @@ pub async fn run(state: AppState, cmd: Cmd) -> Result<()> {
                 outcome.link_id,
                 if outcome.is_new { "nou" } else { "ja existia" }
             );
-            // En CLI processem ara (síncron) per veure el resultat.
+            // En CLI processem ara (síncron, shallow + deep) per veure el resultat.
             if outcome.needs_processing {
-                print!("Processant… ");
-                if let Err(e) = state.process_now(outcome.link_id).await {
+                print!("Processant (shallow + deep)… ");
+                if let Err(e) = state.process_full(outcome.link_id).await {
                     println!("error: {e}");
+                } else {
+                    println!("fet.");
                 }
             }
             if let Some(l) = state.db.link_by_id(outcome.link_id).await? {
-                println!("Estat: {}", l.status);
+                println!("Estat:     {} (deep: {})", l.status, l.deep_status);
                 println!("  títol:     {}", l.title.clone().unwrap_or_default());
                 println!("  tipus:     {}", l.link_type);
                 println!("  sentiment: {}", l.sentiment);
                 println!("  tags:      {}", l.tags.join(", "));
                 println!("  reporters: {}", l.reporter_count());
+                if let Some(ds) = &l.deep_summary {
+                    let preview: String = ds.chars().take(200).collect();
+                    println!("  deep:      {preview}");
+                }
+                if let Some(cs) = &l.code_stats {
+                    println!("  codi:      {cs}");
+                }
             }
             Ok(())
         }
@@ -112,8 +125,16 @@ pub async fn run(state: AppState, cmd: Cmd) -> Result<()> {
     }
 }
 
-async fn serve(state: AppState) -> Result<()> {
+async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Job>) -> Result<()> {
     let addr = state.cfg.bind_addr.clone();
+    let workers = state.cfg.queue_workers;
+
+    // Workers de la cua d'anàlisi.
+    let q_state = state.clone();
+    tokio::spawn(async move { crate::queue::run(q_state, rx, workers).await });
+
+    // Recovery: re-encua feina pendent de la DB.
+    state.recover().await?;
 
     // Bot en background (stub).
     let bot_state = state.clone();

@@ -42,6 +42,11 @@ pub struct Config {
     pub max_link_size_bytes: usize,
     pub summary_max_words: usize,
     pub user_agent: String,
+    /// Nombre de workers concurrents de la cua d'anàlisi.
+    pub queue_workers: usize,
+    /// Límits per a la segona passada (clone de repos).
+    pub clone_timeout_secs: u64,
+    pub clone_max_mb: u64,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -60,6 +65,15 @@ impl Config {
         let summary_max_words: usize = get("SUMMARY_MAX_WORDS", "300")
             .parse()
             .map_err(|_| AppError::Config("SUMMARY_MAX_WORDS invalid".into()))?;
+        let queue_workers: usize = get("QUEUE_WORKERS", "4")
+            .parse()
+            .map_err(|_| AppError::Config("QUEUE_WORKERS invalid".into()))?;
+        let clone_timeout_secs: u64 = get("CLONE_TIMEOUT_SECS", "120")
+            .parse()
+            .map_err(|_| AppError::Config("CLONE_TIMEOUT_SECS invalid".into()))?;
+        let clone_max_mb: u64 = get("CLONE_MAX_MB", "200")
+            .parse()
+            .map_err(|_| AppError::Config("CLONE_MAX_MB invalid".into()))?;
 
         Ok(Config {
             database_url: get("DATABASE_URL", "sqlite://data/linkanalyzer.db"),
@@ -80,6 +94,9 @@ impl Config {
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
             user_agent: get("USER_AGENT", "Clio-LinkAnalyzer/0.1"),
+            queue_workers,
+            clone_timeout_secs,
+            clone_max_mb,
         })
     }
 }

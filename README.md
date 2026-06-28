@@ -12,7 +12,9 @@ Implementació de [definition.md](definition.md). Abast actual: **nucli sòlid**
 | Models + enums | [src/models.rs](src/models.rs) |
 | DB + co-reporting | [src/db.rs](src/db.rs) |
 | Normalització/dedup URL | [src/normalize.rs](src/normalize.rs) |
-| Pipeline async | [src/pipeline.rs](src/pipeline.rs) |
+| Pipeline async (1a passada) | [src/pipeline.rs](src/pipeline.rs) |
+| Cua de workers | [src/queue.rs](src/queue.rs) |
+| 2a passada (deep) | [src/deep.rs](src/deep.rs) |
 | Client LLM (OpenAI-compat) | [src/llm.rs](src/llm.rs) |
 | Orquestració (AppState) | [src/service.rs](src/service.rs) |
 | API REST (axum) | [src/api.rs](src/api.rs) |
@@ -45,6 +47,23 @@ LLM_API_KEY=        # opcional (vLLM local sovint no en cal)
 ```
 
 Si l'endpoint no respon o `LLM_PROVIDER=none`, s'usa **fallback extractiu** (3 primeres frases + tags per freqüència + sentiment per lèxic). El resum es demana en català.
+
+## Cua d'anàlisi + segona passada (deep)
+
+Quan s'encua una URL es processa en **dues fases asíncrones**:
+
+1. **Shallow** (1a passada): fetch → parse → classify → analyze (resum, tags, sentiment).
+2. **Deep** (2a passada, auto-encuada si aplica):
+   - **Repos** (`github/gitlab/...`): `git clone --depth 1 --no-recurse-submodules` a un tmp, escaneig de codi (llenguatges, LOC, fitxers, README) → anàlisi tècnica LLM. `code_stats` (JSON) i `deep_summary` es desen. Tmp s'esborra sempre (RAII guard). Límits: `CLONE_TIMEOUT_SECS`, `CLONE_MAX_MB`.
+   - **Articles/blogs/news**: re-fetch del text complet (no truncat) → resum llarg.
+
+Arquitectura: worker pool amb `tokio::mpsc` + `Semaphore(QUEUE_WORKERS)` ([src/queue.rs](src/queue.rs)). En arrencar `serve`, **recovery** re-encua la feina pendent/encallada de la DB (`status`/`deep_status` a pending/processing/failed). La CLI `add` processa inline (shallow+deep) per mostrar el resultat a l'instant.
+
+```env
+QUEUE_WORKERS=4
+CLONE_TIMEOUT_SECS=120
+CLONE_MAX_MB=200
+```
 
 ## API REST (`/api/v1`)
 

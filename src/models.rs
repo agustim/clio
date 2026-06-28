@@ -38,6 +38,9 @@ str_enum!(Sentiment {
 str_enum!(LinkStatus {
     Pending => "pending", Processing => "processing", Done => "done", Failed => "failed"
 }, default = Pending);
+str_enum!(DeepStatus {
+    None => "none", Pending => "pending", Processing => "processing", Done => "done", Failed => "failed"
+}, default = None);
 // Audit-trail dels reports: el model existeix (spec) però encara no es
 // llegeix de la DB, només s'hi insereix. Mantenim el tipus per a quan s'usi.
 str_enum!(ReportStatus {
@@ -65,6 +68,10 @@ pub struct Link {
     pub sentiment: Sentiment,
     pub status: LinkStatus,
     pub co_reporters: Vec<Uuid>,
+    /// Segona passada (deep): estat, resum profund i stats de codi (repos).
+    pub deep_status: DeepStatus,
+    pub deep_summary: Option<String>,
+    pub code_stats: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -72,6 +79,14 @@ pub struct Link {
 impl Link {
     pub fn reporter_count(&self) -> usize {
         self.co_reporters.len()
+    }
+
+    /// Decideix si aquest link mereix una segona passada profunda.
+    pub fn deep_applicable(&self) -> bool {
+        matches!(
+            self.link_type,
+            LinkType::Repo | LinkType::Article | LinkType::Blog | LinkType::News
+        )
     }
 }
 

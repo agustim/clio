@@ -2,11 +2,13 @@ mod api;
 mod cli;
 mod config;
 mod db;
+mod deep;
 mod error;
 mod llm;
 mod models;
 mod normalize;
 mod pipeline;
+mod queue;
 mod service;
 mod telegram;
 mod webgen;
@@ -34,6 +36,6 @@ async fn run() -> error::Result<()> {
     let args = cli::Cli::parse();
     let cfg = Config::from_env()?;
     let db = Db::connect(&cfg.database_url).await?;
-    let state = AppState::new(db, cfg)?;
-    cli::run(state, args.command).await
+    let (state, rx) = AppState::new(db, cfg)?;
+    cli::run(state, rx, args.command).await
 }

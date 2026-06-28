@@ -52,14 +52,38 @@ impl Db {
     }
 
     async fn migrate(&self) -> Result<()> {
-        let sql = include_str!("../migrations/001_init.sql");
-        // Executa cada statement separat per ';'.
-        for stmt in sql.split(';') {
-            let s = stmt.trim();
-            if s.is_empty() {
+        // Registre de migracions aplicades (idempotent: les ALTER no es repeteixen).
+        sqlx::query("CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT)")
+            .execute(&self.pool)
+            .await?;
+
+        let migrations: &[(&str, &str)] = &[
+            ("001_init", include_str!("../migrations/001_init.sql")),
+            ("002_deep", include_str!("../migrations/002_deep.sql")),
+        ];
+
+        for (name, sql) in migrations {
+            let applied: Option<String> = sqlx::query("SELECT name FROM _migrations WHERE name = ?")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get("name"));
+            if applied.is_some() {
                 continue;
             }
-            sqlx::query(s).execute(&self.pool).await?;
+            for stmt in sql.split(';') {
+                let s = stmt.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                sqlx::query(s).execute(&self.pool).await?;
+            }
+            sqlx::query("INSERT INTO _migrations (name, applied_at) VALUES (?, ?)")
+                .bind(name)
+                .bind(now_str())
+                .execute(&self.pool)
+                .await?;
+            tracing::info!(migration = name, "applied");
         }
         Ok(())
     }
@@ -133,6 +157,11 @@ impl Db {
         let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
         let cor_strs: Vec<String> = serde_json::from_str(&cor_json).unwrap_or_default();
         let co_reporters = cor_strs.iter().map(|s| parse_uuid(s)).collect();
+        let deep_summary: Option<String> = r.get("deep_summary");
+        let code_stats_raw: Option<String> = r.get("code_stats");
+        let code_stats = code_stats_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         Ok(Link {
             id: parse_uuid(r.get::<String, _>("id").as_str()),
             url: r.get("url"),
@@ -143,12 +172,17 @@ impl Db {
             sentiment: Sentiment::from_db(r.get::<String, _>("sentiment").as_str()),
             status: LinkStatus::from_db(r.get::<String, _>("status").as_str()),
             co_reporters,
+            deep_status: DeepStatus::from_db(
+                r.get::<Option<String>, _>("deep_status").as_deref().unwrap_or("none"),
+            ),
+            deep_summary,
+            code_stats,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
             updated_at: parse_ts(r.get::<String, _>("updated_at").as_str()),
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -231,6 +265,60 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // ---- Deep pass ----
+
+    pub async fn set_deep_status(&self, link_id: Uuid, status: DeepStatus) -> Result<()> {
+        sqlx::query("UPDATE links SET deep_status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.as_str())
+            .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_deep_analysis(
+        &self,
+        link_id: Uuid,
+        deep_summary: &str,
+        code_stats: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let stats = code_stats.map(serde_json::to_string).transpose()?;
+        sqlx::query(
+            "UPDATE links SET deep_summary = ?, code_stats = ?, deep_status = 'done', \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(deep_summary)
+        .bind(stats)
+        .bind(now_str())
+        .bind(link_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ---- Recovery (re-encua feina pendent en arrencar) ----
+
+    /// Links amb shallow pendent/encallat o fallit.
+    pub async fn pending_shallow_ids(&self) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status IN ('pending','processing','failed')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
+    /// Links amb shallow fet però deep pendent/encallat.
+    pub async fn pending_deep_ids(&self) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status = 'done' AND deep_status IN ('pending','processing')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
     }
 
     // ---- Reports ----

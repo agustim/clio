@@ -50,6 +50,27 @@ impl LlmClient {
         Self { http, cfg }
     }
 
+    /// Completació lliure: retorna el text de la resposta del model.
+    pub async fn complete(&self, prompt: &str) -> Result<String> {
+        let req = ChatReq {
+            model: &self.cfg.model,
+            messages: vec![Msg { role: "user", content: prompt }],
+            temperature: 0.3,
+        };
+        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let mut rb = self.http.post(&url).json(&req);
+        if let Some(key) = &self.cfg.api_key {
+            rb = rb.bearer_auth(key);
+        }
+        let resp = rb.send().await?.error_for_status()?;
+        let body: ChatResp = resp.json().await?;
+        body.choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| AppError::Pipeline("llm: empty choices".into()))
+    }
+
     pub async fn analyze(&self, title: &str, text: &str, max_words: usize) -> Result<Analysis> {
         let prompt = format!(
             "Ets un analista de continguts. Resumeix el text en CATALÀ en menys de {max_words} paraules, \
