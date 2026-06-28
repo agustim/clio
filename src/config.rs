@@ -44,6 +44,8 @@ pub struct Config {
     pub user_agent: String,
     /// Nombre de workers concurrents de la cua d'anàlisi.
     pub queue_workers: usize,
+    /// Interval (segons) de regeneració de la web durant `serve`. 0 = desactivat.
+    pub web_regen_secs: u64,
     /// Límits per a la segona passada (clone de repos).
     pub clone_timeout_secs: u64,
     pub clone_max_mb: u64,
@@ -68,6 +70,9 @@ impl Config {
         let queue_workers: usize = get("QUEUE_WORKERS", "4")
             .parse()
             .map_err(|_| AppError::Config("QUEUE_WORKERS invalid".into()))?;
+        let web_regen_secs: u64 = get("WEB_REGEN_SECS", "30")
+            .parse()
+            .map_err(|_| AppError::Config("WEB_REGEN_SECS invalid".into()))?;
         let clone_timeout_secs: u64 = get("CLONE_TIMEOUT_SECS", "120")
             .parse()
             .map_err(|_| AppError::Config("CLONE_TIMEOUT_SECS invalid".into()))?;
@@ -95,6 +100,7 @@ impl Config {
             summary_max_words,
             user_agent: get("USER_AGENT", "Clio-LinkAnalyzer/0.1"),
             queue_workers,
+            web_regen_secs,
             clone_timeout_secs,
             clone_max_mb,
         })

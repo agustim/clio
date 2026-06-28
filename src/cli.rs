@@ -136,15 +136,37 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
     // Recovery: re-encua feina pendent de la DB.
     state.recover().await?;
 
+    // Genera la web un cop a l'arrencada (perquè / mostri alguna cosa).
+    if let Err(e) = webgen::generate(&state.db, &state.cfg).await {
+        tracing::warn!(error = %e, "generació inicial de web fallida");
+    }
+
+    // Regeneració periòdica perquè la web reflecteixi els nous links.
+    let regen_secs = state.cfg.web_regen_secs;
+    if regen_secs > 0 {
+        let regen_state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(regen_secs));
+            tick.tick().await; // descarta el primer (immediat); ja s'ha generat a l'arrencada
+            loop {
+                tick.tick().await;
+                if let Err(e) = webgen::generate(&regen_state.db, &regen_state.cfg).await {
+                    tracing::warn!(error = %e, "regeneració de web fallida");
+                }
+            }
+        });
+    }
+
     // Bot en background (stub).
     let bot_state = state.clone();
     tokio::spawn(async move { telegram::run(bot_state).await });
 
+    let public_dir = state.cfg.public_dir.clone();
     let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| AppError::Config(format!("bind {addr}: {e}")))?;
-    tracing::info!("API escoltant a http://{addr}");
+    tracing::info!("API a http://{addr}/api/v1 · web a http://{addr}/ (dir: {public_dir})");
     axum::serve(listener, app)
         .await
         .map_err(|e| AppError::Config(format!("server: {e}")))?;

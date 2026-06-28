@@ -8,14 +8,22 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
+    // Web estàtica a l'arrel (fora de /api): serveix cfg.public_dir, amb
+    // index.html per a directoris.
+    let static_files =
+        ServeDir::new(state.cfg.public_dir.clone()).append_index_html_on_directories(true);
+
     Router::new()
         .route("/api/v1/links", post(create_link).get(list_links))
         .route("/api/v1/links/:id", get(get_link))
         .route("/api/v1/stats", get(stats))
+        // Tot el que no és /api cau a la web estàtica.
+        .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
