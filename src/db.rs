@@ -288,6 +288,8 @@ impl Db {
         rows.iter().map(Self::row_to_link).collect()
     }
 
+    /// Usat pel comando /list del bot Telegram (encara stub).
+    #[allow(dead_code)]
     pub async fn links_reported_by(&self, user_id: Uuid, limit: i64) -> Result<Vec<Link>> {
         let q = format!(
             "SELECT {} FROM links l JOIN reports r ON r.link_id = l.id \

@@ -10,6 +10,7 @@ macro_rules! str_enum {
         pub enum $name {
             $($variant),+
         }
+        #[allow(dead_code)] // alguns variants/mètodes només els usa codi futur (Telegram, audit)
         impl $name {
             pub fn as_str(&self) -> &'static str {
                 match self { $($name::$variant => $s),+ }
@@ -37,6 +38,8 @@ str_enum!(Sentiment {
 str_enum!(LinkStatus {
     Pending => "pending", Processing => "processing", Done => "done", Failed => "failed"
 }, default = Pending);
+// Audit-trail dels reports: el model existeix (spec) però encara no es
+// llegeix de la DB, només s'hi insereix. Mantenim el tipus per a quan s'usi.
 str_enum!(ReportStatus {
     Pending => "pending", Processed => "processed", Failed => "failed"
 }, default = Pending);
@@ -72,6 +75,8 @@ impl Link {
     }
 }
 
+// Model de l'spec; encara no es materialitza des de la DB (vegeu reports table).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub id: Uuid,
