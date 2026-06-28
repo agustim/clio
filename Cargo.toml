@@ -8,8 +8,15 @@ description = "Clio (LinkAnalyzer): recull, analitza i publica enllaços"
 name = "linkanalyzer"
 path = "src/main.rs"
 
+[features]
+default = ["local-embed"]
+# Embeddings in-process (fastembed + onnxruntime). Desactiva-ho per a un build
+# més lleuger si només uses embeddings via HTTP (EMBED_PROVIDER apuntant a un servidor).
+local-embed = ["dep:fastembed"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+fastembed = { version = "5", optional = true }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "sqlite"] }

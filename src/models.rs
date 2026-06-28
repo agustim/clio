@@ -72,6 +72,12 @@ pub struct Link {
     pub deep_status: DeepStatus,
     pub deep_summary: Option<String>,
     pub code_stats: Option<serde_json::Value>,
+    /// Embedding quantitzat (int8) per al ranking personalitzat a la web.
+    /// `e` = vector i8; `s` = factor de dequantització (f32 ≈ e[i] * s).
+    #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<i8>>,
+    #[serde(rename = "s", default, skip_serializing_if = "Option::is_none")]
+    pub embed_scale: Option<f32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -18,6 +18,33 @@ impl LlmConfig {
     }
 }
 
+/// Configuració d'embeddings, independent del LLM de chat.
+#[derive(Debug, Clone)]
+pub struct EmbedConfig {
+    /// none | local (fastembed in-process) | openai | vllm | ollama | http
+    pub provider: String,
+    /// Per a HTTP: nom del model remot. Per a local: id del model fastembed.
+    pub model: String,
+    /// Endpoint OpenAI-compatible (/embeddings). Ignorat en mode local.
+    pub base_url: String,
+    pub api_key: Option<String>,
+    /// Dimensions demanades (només OpenAI v3 honora `dimensions`). 0 = no enviar.
+    pub dim: usize,
+}
+
+impl EmbedConfig {
+    pub fn is_local(&self) -> bool {
+        self.provider == "local"
+    }
+    /// Actiu si hi ha algun proveïdor configurat (local, o HTTP amb base_url).
+    pub fn enabled(&self) -> bool {
+        if self.provider.is_empty() || self.provider == "none" {
+            return false;
+        }
+        self.is_local() || !self.base_url.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GitConfig {
     pub web_repo_url: Option<String>,
@@ -36,6 +63,7 @@ pub struct Config {
     pub database_url: String,
     pub bind_addr: String,
     pub llm: LlmConfig,
+    pub embed: EmbedConfig,
     pub git: GitConfig,
     pub telegram_bot_token: Option<String>,
     pub public_dir: String,
@@ -79,16 +107,35 @@ impl Config {
         let clone_max_mb: u64 = get("CLONE_MAX_MB", "200")
             .parse()
             .map_err(|_| AppError::Config("CLONE_MAX_MB invalid".into()))?;
+        let embed_dim: usize = get("EMBED_DIM", "256")
+            .parse()
+            .map_err(|_| AppError::Config("EMBED_DIM invalid".into()))?;
+
+        // LLM de chat.
+        let llm_provider = get("LLM_PROVIDER", "none");
+        let llm_base = get("LLM_BASE_URL", "http://localhost:8000/v1");
+        let llm_key = opt("LLM_API_KEY");
+
+        // Embeddings: provider propi. Si no s'especifica base_url/api_key,
+        // es reusen els del LLM de chat (ergonòmic per a setups d'un sol proveïdor).
+        let embed = EmbedConfig {
+            provider: get("EMBED_PROVIDER", &llm_provider),
+            model: get("EMBED_MODEL", "multilingual-e5-small"),
+            base_url: opt("EMBED_BASE_URL").unwrap_or_else(|| llm_base.clone()),
+            api_key: opt("EMBED_API_KEY").or_else(|| llm_key.clone()),
+            dim: embed_dim,
+        };
 
         Ok(Config {
             database_url: get("DATABASE_URL", "sqlite://data/linkanalyzer.db"),
             bind_addr: get("BIND_ADDR", "127.0.0.1:8080"),
             llm: LlmConfig {
-                provider: get("LLM_PROVIDER", "none"),
+                provider: llm_provider,
                 model: get("LLM_MODEL", "gpt-3.5-turbo"),
-                base_url: get("LLM_BASE_URL", "http://localhost:8000/v1"),
-                api_key: opt("LLM_API_KEY"),
+                base_url: llm_base,
+                api_key: llm_key,
             },
+            embed,
             git: GitConfig {
                 web_repo_url: opt("WEB_REPO_URL"),
                 web_branch: get("WEB_BRANCH", "main"),

@@ -134,6 +134,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </select>
     </div>
     <div id="stats" class="stats"></div>
+    <div id="perso" class="perso"></div>
     <div id="filters" class="filters"></div>
   </header>
   <main id="grid" class="grid"></main>
@@ -277,6 +278,25 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .deep p { color: var(--muted); line-height: 1.5; margin: .5rem 0 0; }
 .deep-pending { font-size: .76rem; color: var(--faint); font-style: italic; }
 
+/* ---- Cor / personalització ---- */
+.card-top-right { display: flex; align-items: center; gap: .45rem; flex: none; }
+.heart {
+  cursor: pointer; background: none; border: none; padding: .05rem .15rem;
+  font-size: 1.1rem; line-height: 1; color: var(--faint);
+  transition: color var(--transition), transform var(--transition);
+}
+.heart:hover { color: var(--neg); transform: scale(1.18); }
+.heart.on { color: var(--neg); }
+.perso { max-width: var(--maxw); margin: .7rem auto 0; display: none; align-items: center; gap: .8rem; font-size: .82rem; color: var(--muted); }
+.perso.on { display: flex; }
+.perso b { color: var(--fg); }
+.perso-clear {
+  cursor: pointer; font-size: .76rem; padding: .2rem .6rem; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-soft); color: var(--muted);
+  transition: all var(--transition);
+}
+.perso-clear:hover { color: var(--fg); border-color: var(--accent); }
+
 .empty { grid-column: 1/-1; text-align: center; color: var(--muted); padding: 3rem 1rem; font-size: .95rem; }
 
 .footer { text-align: center; color: var(--muted); padding: 2rem; font-size: .82rem; border-top: 1px solid var(--border); }
@@ -295,6 +315,60 @@ let ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
 let activeTag = null;
 
 const $ = (id) => document.getElementById(id);
+
+// ---- Personalització per "cors" (sense usuaris; estat desat a cookie) ----
+// La cookie guarda NOMÉS els ids marcats; el vector de l'usuari (centroide)
+// es recalcula al client a partir dels embeddings dels links amb cor.
+function readHearts() {
+  const m = document.cookie.match(/(?:^|;\s*)clio_hearts=([^;]*)/);
+  if (!m) return [];
+  try { return JSON.parse(decodeURIComponent(m[1])) || []; } catch (e) { return []; }
+}
+function writeHearts(ids) {
+  document.cookie = 'clio_hearts=' + encodeURIComponent(JSON.stringify(ids)) +
+    '; path=/; max-age=31536000; SameSite=Lax';
+}
+let hearts = new Set(readHearts());
+// Hi ha embeddings disponibles? Si no, el cor no té efecte d'ordre: l'amaguem.
+const HAS_EMBED = ALL.some(l => Array.isArray(l.e) && typeof l.s === 'number');
+
+function toggleHeart(id) {
+  if (hearts.has(id)) hearts.delete(id); else hearts.add(id);
+  writeHearts([...hearts]);
+}
+
+// Dequantitza l'embedding int8 d'un link -> array de floats (o null).
+function vecOf(l) {
+  if (!Array.isArray(l.e) || typeof l.s !== 'number') return null;
+  const e = l.e, s = l.s, out = new Array(e.length);
+  for (let i = 0; i < e.length; i++) out[i] = e[i] * s;
+  return out;
+}
+
+// Centroide (mitjana) dels embeddings dels links amb cor. null si no n'hi ha cap.
+function centroid() {
+  let acc = null, n = 0;
+  for (const l of ALL) {
+    if (!hearts.has(l.id)) continue;
+    const v = vecOf(l);
+    if (!v) continue;
+    if (!acc) acc = new Array(v.length).fill(0);
+    for (let i = 0; i < v.length; i++) acc[i] += v[i];
+    n++;
+  }
+  if (!acc || n === 0) return null;
+  for (let i = 0; i < acc.length; i++) acc[i] /= n;
+  return acc;
+}
+
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 // ---- Tema fosc/clar ----
@@ -366,6 +440,15 @@ function render() {
     return (l.title||'').toLowerCase().includes(q) || (l.summary||'').toLowerCase().includes(q);
   });
 
+  // Ordre personalitzat: per afinitat (cosine) amb el centroide dels cors.
+  // Sense cors, es manté l'ordre per defecte del backend (updated_at DESC).
+  const cen = centroid();
+  if (cen) {
+    items.forEach(l => { const v = vecOf(l); l.__score = v ? cosine(v, cen) : -1; });
+    items.sort((a, b) => b.__score - a.__score);
+  }
+  renderPerso();
+
   items.forEach(l => {
     const reporters = (l.co_reporters||[]).length;
     const type = esc(l.link_type || 'other');
@@ -377,7 +460,10 @@ function render() {
     card.innerHTML = `
       <div class="card-top">
         <h2><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title || l.url)}</a></h2>
-        <span class="badge t-${type}">${type}</span>
+        <div class="card-top-right">
+          <span class="badge t-${type}">${type}</span>
+          ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
+        </div>
       </div>
       <p class="summary">${esc(l.summary || 'Sense resum disponible.')}</p>
       <div class="tags">${tags}</div>
@@ -389,10 +475,25 @@ function render() {
     card.querySelectorAll('.tags .chip').forEach(ch => {
       ch.onclick = () => { activeTag = ch.dataset.tag; buildFilters(); render(); };
     });
+    const hb = card.querySelector('.heart');
+    if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
     grid.appendChild(card);
   });
 
   if (!items.length) grid.innerHTML = '<div class="empty">Cap resultat amb aquests filtres.</div>';
+}
+
+// Banner d'estat de la personalització + botó de neteja.
+function renderPerso() {
+  const box = $('perso');
+  if (!box) return;
+  const n = [...hearts].filter(id => ALL.some(l => l.id === id)).length;
+  if (!HAS_EMBED || !n) { box.className = 'perso'; box.innerHTML = ''; return; }
+  box.className = 'perso on';
+  box.innerHTML = '<span>❤ Ordenat per afinitat amb <b>' + n + '</b> ' +
+    (n === 1 ? 'enllaç marcat' : 'enllaços marcats') + '</span>' +
+    '<button id="perso-clear" class="perso-clear">Neteja</button>';
+  $('perso-clear').onclick = () => { hearts.clear(); writeHearts([]); render(); };
 }
 
 function renderStats() {

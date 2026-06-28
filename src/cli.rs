@@ -35,6 +35,8 @@ pub enum Cmd {
     },
     /// Genera la web estàtica a ./public
     Generate,
+    /// Genera embeddings per als links que en manquin (backfill, requereix LLM)
+    Reindex,
     /// Commit + push de la web (opt-in, requereix WEB_REPO_URL)
     Push,
 }
@@ -114,6 +116,15 @@ pub async fn run(
         Cmd::Generate => {
             webgen::generate(&state.db, &state.cfg).await?;
             println!("Web generada a ./{}", state.cfg.public_dir);
+            Ok(())
+        }
+        Cmd::Reindex => {
+            if state.embedder.is_none() {
+                println!("Embeddings no configurats (EMBED_PROVIDER): res a fer.");
+                return Ok(());
+            }
+            let (done, total) = state.reindex_embeddings().await?;
+            println!("Embeddings generats: {done}/{total}");
             Ok(())
         }
         Cmd::Push => {

@@ -2,3 +2,4 @@
 /data
 /public
 .env
+/.fastembed_cache

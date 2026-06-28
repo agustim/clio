@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::db::Db;
 use crate::deep;
+use crate::embed::Embedder;
 use crate::error::Result;
 use crate::llm::LlmClient;
 use crate::models::{DeepStatus, LinkStatus, User};
@@ -18,6 +19,7 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub http: reqwest::Client,
     pub llm: Option<Arc<LlmClient>>,
+    pub embedder: Option<Arc<Embedder>>,
     pub queue: Queue,
 }
 
@@ -38,8 +40,9 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
         let llm = pipeline::build_llm(&cfg, http.clone());
+        let embedder = crate::embed::build(&cfg.embed, http.clone())?.map(Arc::new);
         let (queue, rx) = queue::start();
-        let state = Self { db, cfg: Arc::new(cfg), http, llm, queue };
+        let state = Self { db, cfg: Arc::new(cfg), http, llm, embedder, queue };
         Ok((state, rx))
     }
 
@@ -96,11 +99,38 @@ impl AppState {
         Ok(())
     }
 
+    /// Backfill d'embeddings: genera'ls per a tots els links `done` que en
+    /// manquin. Retorna (generats, total_pendents). No-op sense LLM.
+    pub async fn reindex_embeddings(&self) -> Result<(usize, usize)> {
+        let Some(emb) = self.embedder.as_deref() else {
+            return Ok((0, 0));
+        };
+        let ids = self.db.missing_embedding_ids().await?;
+        let total = ids.len();
+        let mut done = 0usize;
+        for id in ids {
+            if let Some(l) = self.db.link_by_id(id).await? {
+                let text = format!(
+                    "{}\n{}\n{}",
+                    l.title.unwrap_or_default(),
+                    l.summary.unwrap_or_default(),
+                    l.tags.join(" ")
+                );
+                match pipeline::embed_and_store(&self.db, emb, id, &text).await {
+                    Ok(_) => done += 1,
+                    Err(e) => tracing::warn!(%id, error = %e, "reindex embed failed"),
+                }
+            }
+        }
+        Ok((done, total))
+    }
+
     /// Processament complet inline (shallow + deep) — usat per la CLI, que no
     /// té workers en marxa. Espera fins acabar.
     pub async fn process_full(&self, link_id: Uuid) -> Result<()> {
         let llm = self.llm.as_deref();
-        pipeline::process_link(&self.db, &self.cfg, &self.http, llm, link_id).await?;
+        let embedder = self.embedder.as_deref();
+        pipeline::process_link(&self.db, &self.cfg, &self.http, llm, embedder, link_id).await?;
 
         if let Some(link) = self.db.link_by_id(link_id).await? {
             if link.deep_applicable() {

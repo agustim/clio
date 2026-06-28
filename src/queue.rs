@@ -68,9 +68,10 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
 
 async fn handle(state: &AppState, job: Job) {
     let llm = state.llm.as_deref();
+    let embedder = state.embedder.as_deref();
     match job.stage {
         Stage::Shallow => {
-            match pipeline::process_link(&state.db, &state.cfg, &state.http, llm, job.link_id).await {
+            match pipeline::process_link(&state.db, &state.cfg, &state.http, llm, embedder, job.link_id).await {
                 Ok(()) => {
                     // Encua la segona passada si aplica.
                     if let Ok(Some(link)) = state.db.link_by_id(job.link_id).await {

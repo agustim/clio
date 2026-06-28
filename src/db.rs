@@ -60,6 +60,7 @@ impl Db {
         let migrations: &[(&str, &str)] = &[
             ("001_init", include_str!("../migrations/001_init.sql")),
             ("002_deep", include_str!("../migrations/002_deep.sql")),
+            ("003_embeddings", include_str!("../migrations/003_embeddings.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -162,6 +163,12 @@ impl Db {
         let code_stats = code_stats_raw
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
+        // BLOB de bytes -> Vec<i8> (reinterpretació directa).
+        let embedding: Option<Vec<i8>> = r
+            .get::<Option<Vec<u8>>, _>("embedding")
+            .map(|b| b.into_iter().map(|x| x as i8).collect());
+        let embed_scale: Option<f32> =
+            r.get::<Option<f64>, _>("embed_scale").map(|s| s as f32);
         Ok(Link {
             id: parse_uuid(r.get::<String, _>("id").as_str()),
             url: r.get("url"),
@@ -177,12 +184,14 @@ impl Db {
             ),
             deep_summary,
             code_stats,
+            embedding,
+            embed_scale,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
             updated_at: parse_ts(r.get::<String, _>("updated_at").as_str()),
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, embedding, embed_scale, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -297,6 +306,36 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // ---- Embeddings ----
+
+    /// Desa l'embedding quantitzat (int8) i el seu factor d'escala.
+    pub async fn update_link_embedding(
+        &self,
+        link_id: Uuid,
+        embedding: &[i8],
+        scale: f32,
+    ) -> Result<()> {
+        // i8 -> bytes per al BLOB.
+        let bytes: Vec<u8> = embedding.iter().map(|&x| x as u8).collect();
+        sqlx::query("UPDATE links SET embedding = ?, embed_scale = ? WHERE id = ?")
+            .bind(bytes)
+            .bind(scale as f64)
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Links ja processats (shallow done) però sense embedding: per al backfill.
+    pub async fn missing_embedding_ids(&self) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status = 'done' AND embedding IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
     }
 
     // ---- Recovery (re-encua feina pendent en arrencar) ----

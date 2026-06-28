@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::db::Db;
 use crate::error::{AppError, Result};
+use crate::embed::Embedder;
 use crate::llm::LlmClient;
 use crate::models::{Analysis, LinkType, Sentiment};
 use scraper::{Html, Selector};
@@ -195,6 +196,7 @@ pub async fn process_link(
     cfg: &Config,
     http: &reqwest::Client,
     llm: Option<&LlmClient>,
+    embedder: Option<&Embedder>,
     link_id: Uuid,
 ) -> Result<()> {
     let link = db.link_by_id(link_id).await?.ok_or(AppError::NotFound)?;
@@ -205,6 +207,13 @@ pub async fn process_link(
     match result {
         Ok((title, link_type, analysis)) => {
             db.update_link_analysis(link_id, title.as_deref(), link_type, &analysis).await?;
+            // Embedding semàntic per al ranking personalitzat (best-effort).
+            if let Some(emb) = embedder {
+                let text = embed_source(title.as_deref(), &analysis);
+                if let Err(e) = embed_and_store(db, emb, link_id, &text).await {
+                    tracing::warn!(%link_id, error = %e, "embedding failed");
+                }
+            }
             tracing::info!(%link_id, url = %link.url, "processed");
             Ok(())
         }
@@ -243,6 +252,42 @@ async fn run_inner(
     Ok((parsed.title, link_type, analysis))
 }
 
+// ---- Embeddings ----
+
+/// Text font de l'embedding: títol + resum + tags (senyal semàntic compacte).
+fn embed_source(title: Option<&str>, a: &Analysis) -> String {
+    format!("{}\n{}\n{}", title.unwrap_or(""), a.summary, a.tags.join(" "))
+}
+
+/// L2-normalitza (perquè el centroide de "cors" ponderi cada link igual) i
+/// quantitza a int8 simètric. Retorna (vec_i8, scale) on f32 ≈ i8 * scale.
+pub fn quantize(v: &[f32]) -> Option<(Vec<i8>, f32)> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return None;
+    }
+    let scale = 1.0 / 127.0; // vector normalitzat => |x| ≤ 1
+    let q: Vec<i8> = v
+        .iter()
+        .map(|&x| ((x / norm) / scale).round().clamp(-127.0, 127.0) as i8)
+        .collect();
+    Some((q, scale))
+}
+
+/// Genera i desa l'embedding d'un link (best-effort, requereix embedder actiu).
+pub async fn embed_and_store(
+    db: &Db,
+    embedder: &Embedder,
+    link_id: Uuid,
+    text: &str,
+) -> Result<()> {
+    let v = embedder.embed(text).await?;
+    if let Some((q, scale)) = quantize(&v) {
+        db.update_link_embedding(link_id, &q, scale).await?;
+    }
+    Ok(())
+}
+
 /// Construeix el client LLM si esta configurat.
 pub fn build_llm(cfg: &Config, http: reqwest::Client) -> Option<Arc<LlmClient>> {
     if cfg.llm.enabled() {
@@ -279,5 +324,19 @@ mod tests {
     fn heuristic_first_sentences() {
         let a = heuristic_analysis("T", "One. Two. Three. Four.", 300);
         assert_eq!(a.summary, "One. Two. Three.");
+    }
+
+    #[test]
+    fn quantize_preserves_direction() {
+        // Vector zero => None.
+        assert!(quantize(&[0.0, 0.0, 0.0]).is_none());
+
+        // Dequantitzat ha de quedar prop de la direcció normalitzada.
+        let v = vec![3.0f32, 4.0, 0.0]; // norm 5 => unit (0.6,0.8,0)
+        let (q, s) = quantize(&v).unwrap();
+        let deq: Vec<f32> = q.iter().map(|&x| x as f32 * s).collect();
+        assert!((deq[0] - 0.6).abs() < 0.02);
+        assert!((deq[1] - 0.8).abs() < 0.02);
+        assert!(deq[2].abs() < 0.02);
     }
 }

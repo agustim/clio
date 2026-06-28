@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod db;
 mod deep;
+mod embed;
 mod error;
 mod llm;
 mod models;
