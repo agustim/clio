@@ -3,7 +3,7 @@ use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment, User, UserRole}
 use crate::service::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,9 +19,14 @@ pub fn router(state: AppState) -> Router {
         ServeDir::new(state.cfg.public_dir.clone()).append_index_html_on_directories(true);
 
     Router::new()
+        .route("/api/v1/ping", get(ping))
+        .route("/api/v1/me", get(me))
         .route("/api/v1/links", post(create_link).get(list_links))
         .route("/api/v1/links/:id", get(get_link).delete(delete_link))
         .route("/api/v1/links/:id/reprocess", post(reprocess_link))
+        .route("/api/v1/users", get(users_list).post(users_create))
+        .route("/api/v1/users/:id", patch(users_update).delete(users_delete))
+        .route("/api/v1/users/:id/token", post(users_regen_token))
         .route("/api/v1/stats", get(stats))
         // Tot el que no és /api cau a la web estàtica.
         .fallback_service(static_files)
@@ -41,6 +46,116 @@ async fn auth(state: &AppState, headers: &HeaderMap, body_token: Option<&str>) -
         .ok_or(AppError::Unauthorized)?;
 
     state.db.user_by_token(&token).await?.ok_or(AppError::Unauthorized)
+}
+
+/// Com `auth` però exigeix rol admin.
+async fn admin(state: &AppState, headers: &HeaderMap) -> Result<User> {
+    let user = auth(state, headers, None).await?;
+    if user.role != UserRole::Admin {
+        return Err(AppError::Forbidden);
+    }
+    Ok(user)
+}
+
+/// Sonda perquè el client sàpiga que parla amb un servei viu (mode `serve`).
+/// La web estàtica pura no respon aquí i amaga les accions.
+async fn ping() -> Json<Value> {
+    Json(json!({ "service": "clio", "serve": true }))
+}
+
+/// Identitat de l'usuari del token (perquè la web sàpiga el rol).
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
+    let u = auth(&state, &headers, None).await?;
+    Ok(Json(json!({ "id": u.id, "username": u.username, "role": u.role })))
+}
+
+// ---- Gestió d'usuaris (només admin) ----
+
+async fn users_list(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
+    admin(&state, &headers).await?;
+    let users = state.db.list_users().await?; // api_token no es serialitza (skip)
+    Ok(Json(json!({ "count": users.len(), "users": users })))
+}
+
+#[derive(Deserialize)]
+struct CreateUserReq {
+    username: String,
+    #[serde(default)]
+    admin: bool,
+}
+
+async fn users_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateUserReq>,
+) -> Result<Json<Value>> {
+    admin(&state, &headers).await?;
+    let username = body.username.trim();
+    if username.is_empty() {
+        return Err(AppError::BadRequest("username buit".into()));
+    }
+    if state.db.user_by_username(username).await?.is_some() {
+        return Err(AppError::BadRequest("ja existeix un usuari amb aquest nom".into()));
+    }
+    let role = if body.admin { UserRole::Admin } else { UserRole::User };
+    let u = state.db.create_user(username, role).await?;
+    // El token només es mostra aquí (a la creació) i en regenerar-lo.
+    Ok(Json(json!({
+        "id": u.id, "username": u.username, "role": u.role, "api_token": u.api_token,
+    })))
+}
+
+#[derive(Deserialize)]
+struct UpdateUserReq {
+    username: Option<String>,
+    admin: Option<bool>,
+}
+
+async fn users_update(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateUserReq>,
+) -> Result<Json<Value>> {
+    let me = admin(&state, &headers).await?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    // Evita que un admin es tregui a si mateix els privilegis i quedi sense admins.
+    if uuid == me.id && body.admin == Some(false) {
+        return Err(AppError::BadRequest("no et pots treure el rol admin a tu mateix".into()));
+    }
+    let role = body.admin.map(|a| if a { UserRole::Admin } else { UserRole::User });
+    let username = body.username.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let u = state
+        .db
+        .update_user(uuid, username, role)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(json!({ "id": u.id, "username": u.username, "role": u.role })))
+}
+
+async fn users_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let me = admin(&state, &headers).await?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    if uuid == me.id {
+        return Err(AppError::BadRequest("no et pots esborrar a tu mateix".into()));
+    }
+    let deleted = state.db.delete_user(uuid).await?;
+    Ok(Json(json!({ "id": uuid, "deleted": deleted })))
+}
+
+async fn users_regen_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    admin(&state, &headers).await?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    let token = state.db.regenerate_token(uuid).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(json!({ "id": uuid, "api_token": token })))
 }
 
 #[derive(Deserialize)]

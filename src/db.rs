@@ -114,18 +114,81 @@ impl Db {
         })
     }
 
-    pub async fn user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| User {
+    fn row_to_user(r: &sqlx::sqlite::SqliteRow) -> User {
+        User {
             id: parse_uuid(r.get::<String, _>("id").as_str()),
             username: r.get("username"),
             api_token: r.get("api_token"),
             role: UserRole::from_db(r.get::<String, _>("role").as_str()),
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
-        }))
+        }
+    }
+
+    pub async fn user_by_username(&self, username: &str) -> Result<Option<User>> {
+        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| Self::row_to_user(&r)))
+    }
+
+    pub async fn user_by_id(&self, id: Uuid) -> Result<Option<User>> {
+        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| Self::row_to_user(&r)))
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<User>> {
+        let rows = sqlx::query("SELECT id, username, api_token, role, created_at FROM users ORDER BY created_at")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(Self::row_to_user).collect())
+    }
+
+    /// Modifica nom i/o rol. Retorna l'usuari resultant (None si no existeix).
+    pub async fn update_user(
+        &self,
+        id: Uuid,
+        username: Option<&str>,
+        role: Option<UserRole>,
+    ) -> Result<Option<User>> {
+        let Some(mut u) = self.user_by_id(id).await? else {
+            return Ok(None);
+        };
+        if let Some(n) = username {
+            u.username = n.to_string();
+        }
+        if let Some(r) = role {
+            u.role = r;
+        }
+        sqlx::query("UPDATE users SET username = ?, role = ? WHERE id = ?")
+            .bind(&u.username)
+            .bind(u.role.as_str())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(u))
+    }
+
+    /// Regenera l'api_token. Retorna el nou token (None si l'usuari no existeix).
+    pub async fn regenerate_token(&self, id: Uuid) -> Result<Option<String>> {
+        let token = format!("lat_{}", Uuid::new_v4().simple());
+        let res = sqlx::query("UPDATE users SET api_token = ? WHERE id = ?")
+            .bind(&token)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok((res.rows_affected() > 0).then_some(token))
+    }
+
+    pub async fn delete_user(&self, id: Uuid) -> Result<bool> {
+        let res = sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// Retorna l'usuari local de la CLI, creant-lo si cal.
@@ -141,13 +204,7 @@ impl Db {
             .bind(token)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(|r| User {
-            id: parse_uuid(r.get::<String, _>("id").as_str()),
-            username: r.get("username"),
-            api_token: r.get("api_token"),
-            role: UserRole::from_db(r.get::<String, _>("role").as_str()),
-            created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
-        }))
+        Ok(row.map(|r| Self::row_to_user(&r)))
     }
 
     /// Resol `co_reporters` (UUIDs) -> noms d'usuari, en lot, per a una llista

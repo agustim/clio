@@ -109,6 +109,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         </div>
       </div>
       <div class="topbar-actions">
+        <button id="admin-btn" class="theme-toggle" aria-label="Usuaris" title="Gestió d'usuaris" style="display:none">👤</button>
         <button id="token-btn" class="theme-toggle" aria-label="Sessió" title="Introdueix el teu API token">🔑</button>
         <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
           <span class="theme-icon"></span>
@@ -339,6 +340,39 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .toast.ok { border-color: var(--pos); }
 .toast.err { border-color: var(--neg); }
 
+/* Modal d'usuaris */
+.modal-ov {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  background: rgba(0,0,0,.5); backdrop-filter: blur(3px); padding: 1rem;
+}
+.modal {
+  width: min(640px, 100%); max-height: 86vh; overflow: auto;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between;
+  padding: .9rem 1.1rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--card); }
+.modal-head h3 { margin: 0; font-size: 1.05rem; }
+.modal-x { cursor: pointer; background: none; border: none; color: var(--muted); font-size: 1.1rem; }
+.modal-x:hover { color: var(--fg); }
+.modal-body { padding: 1.1rem; }
+.utable { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.utable th { text-align: left; color: var(--faint); font-weight: 500; font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; padding: .3rem .4rem; }
+.utable td { padding: .45rem .4rem; border-top: 1px solid var(--border); vertical-align: middle; }
+.utable .you { color: var(--faint); font-size: .78rem; }
+.urow-actions { display: flex; gap: .3rem; justify-content: flex-end; flex-wrap: wrap; }
+.urow-actions .act { padding: .2rem .45rem; }
+.act[disabled] { opacity: .35; cursor: not-allowed; }
+.rolebadge { font-size: .72rem; padding: .1rem .45rem; border-radius: 6px; border: 1px solid var(--border); }
+.rolebadge.admin { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.rolebadge.user { color: var(--muted); }
+.ucreate { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--border); flex-wrap: wrap; }
+.ucreate input[type=text], .ucreate #nu-name {
+  flex: 1 1 200px; padding: .45rem .7rem; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-soft); color: var(--fg); font-size: .88rem;
+}
+.nu-adm { display: inline-flex; align-items: center; gap: .3rem; color: var(--muted); font-size: .85rem; }
+
 /* ---- Cor / personalització ---- */
 .card-top-right { display: flex; align-items: center; gap: .45rem; flex: none; }
 .heart {
@@ -393,24 +427,37 @@ const LAST_VISIT = readLastVisit();
 function linkTime(l) { const t = Date.parse(l.created_at); return isNaN(t) ? 0 : t; }
 function isNew(l) { return LAST_VISIT > 0 && linkTime(l) > LAST_VISIT; }
 
-// ---- Sessió: API token (per reforçar / donar de baixa links) ----
-// Les accions només són possibles servint per HTTP (l'API i la web comparteixen
-// origen). Sota file:// no hi ha API: s'amaguen els botons.
-const CAN_API = location.protocol !== 'file:';
+// ---- Sessió / API ----
+// Les accions (clau, refer, baixa, usuaris) només tenen sentit contra un
+// servei viu (mode `serve`). Es detecta amb /api/v1/ping: la web estàtica pura
+// (file:// o hosting sense backend) no respon i s'amaga tota la UI d'accions.
+let API_LIVE = false;       // determinat per probeApi()
+let ME = null;              // {id, username, role} de /api/v1/me
 function getToken() { return localStorage.getItem('clio-token') || ''; }
 function setToken(t) { if (t) localStorage.setItem('clio-token', t); else localStorage.removeItem('clio-token'); }
-function hasToken() { return CAN_API && !!getToken(); }
+function hasToken() { return API_LIVE && !!getToken(); }
+function isAdmin() { return API_LIVE && ME && ME.role === 'admin'; }
 
-async function api(method, path) {
-  const r = await fetch('/api/v1' + path, {
-    method,
-    headers: { 'Authorization': 'Bearer ' + getToken() },
-  });
+async function probeApi() {
+  try { const r = await fetch('/api/v1/ping', { cache: 'no-store' }); API_LIVE = r.ok; }
+  catch (e) { API_LIVE = false; }
+}
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Authorization': 'Bearer ' + getToken() } };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch('/api/v1' + path, opts);
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     throw new Error(j.error || ('HTTP ' + r.status));
   }
   return r.json().catch(() => ({}));
+}
+
+async function loadMe() {
+  ME = null;
+  if (!API_LIVE || !getToken()) return;
+  try { ME = await api('GET', '/me'); } catch (e) { ME = null; }
 }
 
 // Toast efímer a baix de la pantalla.
@@ -442,16 +489,116 @@ async function deleteLink(id) {
 function initTokenButton() {
   const btn = $('token-btn');
   if (!btn) return;
-  if (!CAN_API) { btn.style.display = 'none'; return; }
+  if (!API_LIVE) { btn.style.display = 'none'; return; }
   const refresh = () => { btn.classList.toggle('on', !!getToken()); btn.title = getToken() ? 'Sessió activa · clica per canviar/treure el token' : 'Introdueix el teu API token'; };
   refresh();
-  btn.onclick = () => {
+  btn.onclick = async () => {
     const cur = getToken();
     const t = prompt(cur ? 'API token (buit per tancar sessió):' : 'Enganxa el teu API token:', cur);
     if (t === null) return;
     setToken(t.trim());
-    refresh(); render();
+    await loadMe();
+    refresh(); refreshAdminBtn(); render();
     toast(getToken() ? 'Sessió iniciada.' : 'Sessió tancada.', 'ok');
+  };
+}
+
+// ---- Admin: gestió d'usuaris ----
+function refreshAdminBtn() {
+  const b = $('admin-btn');
+  if (!b) return;
+  b.style.display = isAdmin() ? '' : 'none';
+  b.onclick = openUsersModal;
+}
+
+// Mostra un token un sol cop (és copiable des del prompt).
+function showToken(username, token) {
+  prompt("Token de " + username + " (copia'l ara, no es tornarà a mostrar):", token);
+}
+
+async function openUsersModal() {
+  let users;
+  try { users = (await api('GET', '/users')).users || []; }
+  catch (e) { toast('Error carregant usuaris: ' + e.message, 'err'); return; }
+
+  const ov = document.createElement('div');
+  ov.className = 'modal-ov';
+  ov.innerHTML = `<div class="modal">
+    <div class="modal-head"><h3>👤 Usuaris</h3><button class="modal-x" title="Tanca">✕</button></div>
+    <div class="modal-body">
+      <table class="utable">
+        <thead><tr><th>Usuari</th><th>Rol</th><th>Creat</th><th></th></tr></thead>
+        <tbody id="ulist"></tbody>
+      </table>
+      <div class="ucreate">
+        <input id="nu-name" placeholder="nom del nou usuari" autocomplete="off">
+        <label class="nu-adm"><input type="checkbox" id="nu-admin"> admin</label>
+        <button id="nu-add" class="act">+ Crea</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector('.modal-x').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  document.addEventListener('keydown', function esc2(e){ if(e.key==='Escape'){ close(); document.removeEventListener('keydown', esc2);} });
+
+  const refresh = async () => {
+    try { fill((await api('GET', '/users')).users || []); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  function fill(list) {
+    const tb = ov.querySelector('#ulist');
+    tb.innerHTML = '';
+    list.forEach(u => {
+      const tr = document.createElement('tr');
+      const mine = ME && u.id === ME.id;
+      tr.innerHTML = `<td>${esc(u.username)}${mine ? ' <span class="you">(tu)</span>' : ''}</td>
+        <td><span class="rolebadge ${u.role}">${u.role}</span></td>
+        <td>${(u.created_at || '').slice(0,10)}</td>
+        <td class="urow-actions">
+          <button class="act" data-act="role" title="Canvia el rol">${u.role==='admin'?'→ user':'→ admin'}</button>
+          <button class="act" data-act="rename" title="Reanomena">✎</button>
+          <button class="act" data-act="token" title="Regenera token">🔑</button>
+          <button class="act act-delete" data-act="del" title="Esborra"${mine?' disabled':''}>🗑</button>
+        </td>`;
+      tr.querySelector('[data-act=role]').onclick = async () => {
+        try { await api('PATCH', '/users/' + u.id, { admin: u.role !== 'admin' }); toast('Rol actualitzat.', 'ok'); refresh(); if (mine) { await loadMe(); refreshAdminBtn(); } }
+        catch (e) { toast(e.message, 'err'); }
+      };
+      tr.querySelector('[data-act=rename]').onclick = async () => {
+        const n = prompt('Nou nom per ' + u.username + ':', u.username);
+        if (!n || !n.trim()) return;
+        try { await api('PATCH', '/users/' + u.id, { username: n.trim() }); toast('Nom actualitzat.', 'ok'); refresh(); }
+        catch (e) { toast(e.message, 'err'); }
+      };
+      tr.querySelector('[data-act=token]').onclick = async () => {
+        if (!confirm('Regenerar el token de ' + u.username + '? El token actual deixarà de funcionar.')) return;
+        try { showToken(u.username, (await api('POST', '/users/' + u.id + '/token')).api_token); }
+        catch (e) { toast(e.message, 'err'); }
+      };
+      const del = tr.querySelector('[data-act=del]');
+      if (!mine) del.onclick = async () => {
+        if (!confirm('Esborrar definitivament ' + u.username + '?')) return;
+        try { await api('DELETE', '/users/' + u.id); toast('Usuari esborrat.', 'ok'); refresh(); }
+        catch (e) { toast(e.message, 'err'); }
+      };
+      tb.appendChild(tr);
+    });
+  }
+  fill(users);
+
+  ov.querySelector('#nu-add').onclick = async () => {
+    const name = ov.querySelector('#nu-name').value.trim();
+    if (!name) { toast('Cal un nom.', 'err'); return; }
+    const adm = ov.querySelector('#nu-admin').checked;
+    try {
+      const d = await api('POST', '/users', { username: name, admin: adm });
+      ov.querySelector('#nu-name').value = '';
+      ov.querySelector('#nu-admin').checked = false;
+      refresh();
+      showToken(d.username, d.api_token);
+    } catch (e) { toast(e.message, 'err'); }
   };
 }
 
@@ -736,7 +883,10 @@ async function maybeFetch() {
 
 (async function init() {
   initTheme();
+  await probeApi();
+  await loadMe();
   initTokenButton();
+  refreshAdminBtn();
   await maybeFetch();
   applyHash();
   renderStats();
