@@ -83,15 +83,16 @@ async fn handle(state: &AppState, job: Job) {
                             state.queue.deep(job.link_id);
                         }
                     }
+                    // Contingut nou publicable: dispara deploy reactiu (debounced).
+                    state.web_dirty.notify_one();
                 }
                 Err(e) => tracing::error!(link_id = %job.link_id, error = %e, "shallow job failed"),
             }
         }
         Stage::Deep => {
-            if let Err(e) =
-                deep::process_deep(&state.db, &state.cfg, &state.http, llm, job.link_id).await
-            {
-                tracing::error!(link_id = %job.link_id, error = %e, "deep job failed");
+            match deep::process_deep(&state.db, &state.cfg, &state.http, llm, job.link_id).await {
+                Ok(()) => state.web_dirty.notify_one(),
+                Err(e) => tracing::error!(link_id = %job.link_id, error = %e, "deep job failed"),
             }
         }
     }

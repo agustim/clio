@@ -150,6 +150,39 @@ impl Db {
         }))
     }
 
+    /// Resol `co_reporters` (UUIDs) -> noms d'usuari, en lot, per a una llista
+    /// de links. Manté l'ordre dels reporters de cada link.
+    pub async fn fill_reporters(&self, links: &mut [Link]) -> Result<()> {
+        use std::collections::HashSet;
+        let ids: HashSet<String> = links
+            .iter()
+            .flat_map(|l| l.co_reporters.iter().map(|u| u.to_string()))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let q = format!("SELECT id, username FROM users WHERE id IN ({placeholders})");
+        let mut query = sqlx::query(&q);
+        let id_vec: Vec<String> = ids.into_iter().collect();
+        for id in &id_vec {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for r in &rows {
+            names.insert(r.get::<String, _>("id"), r.get::<String, _>("username"));
+        }
+        for l in links.iter_mut() {
+            l.reporters = l
+                .co_reporters
+                .iter()
+                .filter_map(|u| names.get(&u.to_string()).cloned())
+                .collect();
+        }
+        Ok(())
+    }
+
     // ---- Links ----
 
     fn row_to_link(r: &sqlx::sqlite::SqliteRow) -> Result<Link> {
@@ -179,6 +212,7 @@ impl Db {
             sentiment: Sentiment::from_db(r.get::<String, _>("sentiment").as_str()),
             status: LinkStatus::from_db(r.get::<String, _>("status").as_str()),
             co_reporters,
+            reporters: Vec::new(), // s'omple amb fill_reporters
             deep_status: DeepStatus::from_db(
                 r.get::<Option<String>, _>("deep_status").as_deref().unwrap_or("none"),
             ),
@@ -202,7 +236,11 @@ impl Db {
     pub async fn link_by_id(&self, id: Uuid) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE id = ?", Self::LINK_COLS);
         let row = sqlx::query(&q).bind(id.to_string()).fetch_optional(&self.pool).await?;
-        row.map(|r| Self::row_to_link(&r)).transpose()
+        let mut link = row.map(|r| Self::row_to_link(&r)).transpose()?;
+        if let Some(l) = link.as_mut() {
+            self.fill_reporters(std::slice::from_mut(l)).await?;
+        }
+        Ok(link)
     }
 
     /// Crea link nou amb un primer reporter. Estat = pending.
@@ -328,6 +366,15 @@ impl Db {
         Ok(())
     }
 
+    /// Tots els ids de links (més recents primer), per a reprocessament massiu.
+    pub async fn all_link_ids(&self, limit: i64) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query("SELECT id FROM links ORDER BY updated_at DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
     /// Links ja processats (shallow done) però sense embedding: per al backfill.
     pub async fn missing_embedding_ids(&self) -> Result<Vec<Uuid>> {
         let rows = sqlx::query(
@@ -412,7 +459,9 @@ impl Db {
         query = query.bind(limit);
 
         let rows = query.fetch_all(&self.pool).await?;
-        rows.iter().map(Self::row_to_link).collect()
+        let mut links: Vec<Link> = rows.iter().map(Self::row_to_link).collect::<Result<_>>()?;
+        self.fill_reporters(&mut links).await?;
+        Ok(links)
     }
 
     /// Usat pel comando /list del bot Telegram (encara stub).

@@ -44,7 +44,11 @@ async fn auth(state: &AppState, headers: &HeaderMap, body_token: Option<&str>) -
 
 #[derive(Deserialize)]
 struct CreateLinkReq {
-    url: String,
+    /// Un sol enllaç.
+    url: Option<String>,
+    /// O un lot d'enllaços.
+    #[serde(default)]
+    urls: Vec<String>,
     token: Option<String>,
 }
 
@@ -54,16 +58,42 @@ async fn create_link(
     Json(body): Json<CreateLinkReq>,
 ) -> Result<Json<Value>> {
     let user = auth(&state, &headers, body.token.as_deref()).await?;
-    let outcome = state.report_link(&user, &body.url).await?;
-    if outcome.needs_processing {
-        state.enqueue(outcome.link_id);
+
+    // Accepta `url` (un) o `urls` (lot). El lot té prioritat si ve ple.
+    let urls: Vec<String> = if !body.urls.is_empty() {
+        body.urls
+    } else {
+        body.url.into_iter().collect()
+    };
+    if urls.is_empty() {
+        return Err(AppError::BadRequest("cal 'url' o 'urls'".into()));
     }
-    Ok(Json(json!({
-        "link_id": outcome.link_id,
-        "is_new": outcome.is_new,
-        "added_reporter": outcome.added_reporter,
-        "status": "queued",
-    })))
+
+    let mut results = Vec::with_capacity(urls.len());
+    for raw in urls {
+        match state.report_link(&user, &raw).await {
+            Ok(outcome) => {
+                if outcome.needs_processing {
+                    state.enqueue(outcome.link_id);
+                }
+                results.push(json!({
+                    "url": raw,
+                    "link_id": outcome.link_id,
+                    "is_new": outcome.is_new,
+                    "added_reporter": outcome.added_reporter,
+                    "status": "queued",
+                }));
+            }
+            Err(e) => results.push(json!({ "url": raw, "error": e.to_string() })),
+        }
+    }
+
+    // Compat: si era un sol enllaç, retorna l'objecte directament.
+    if results.len() == 1 {
+        Ok(Json(results.into_iter().next().unwrap()))
+    } else {
+        Ok(Json(json!({ "count": results.len(), "results": results })))
+    }
 }
 
 #[derive(Deserialize)]

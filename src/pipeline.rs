@@ -184,10 +184,26 @@ fn heuristic_analysis(title: &str, text: &str, max_words: usize) -> Analysis {
         summary = words[..max_words].join(" ");
     }
     Analysis {
+        title: None,
         summary,
         tags: heuristic_tags(title, text),
         sentiment: heuristic_sentiment(text),
     }
+}
+
+/// Retalla un títol a ~80 caràcters respectant límits de paraula.
+pub fn clamp_title(s: &str) -> String {
+    const MAX: usize = 80;
+    let t = s.trim();
+    if t.chars().count() <= MAX {
+        return t.to_string();
+    }
+    let truncated: String = t.chars().take(MAX).collect();
+    let cut = match truncated.rfind(' ') {
+        Some(i) if i >= MAX / 2 => &truncated[..i],
+        _ => truncated.trim_end(),
+    };
+    format!("{}…", cut.trim_end_matches(['.', ',', ' ', '-', ':']))
 }
 
 /// Pipeline complet per a un link. Actualitza la DB.
@@ -231,8 +247,15 @@ async fn run_inner(
     llm: Option<&LlmClient>,
     url: &str,
 ) -> Result<(Option<String>, LinkType, Analysis)> {
-    let html = fetch(http, url, cfg.max_link_size_bytes).await?;
-    let parsed = parse(&html);
+    // Xarxes socials (X/Bluesky) renderitzen amb JS: un GET només dóna un mur de
+    // login. Provem un extractor d'API pública abans del fetch genèric.
+    let parsed = match crate::social::extract(http, url).await? {
+        Some(p) => p,
+        None => {
+            let html = fetch(http, url, cfg.max_link_size_bytes).await?;
+            parse(&html)
+        }
+    };
     let link_type = classify(url, parsed.og_type.as_deref());
 
     let title = parsed.title.clone().unwrap_or_default();
@@ -249,7 +272,15 @@ async fn run_inner(
         None => heuristic_analysis(&title, &parsed.text, cfg.summary_max_words),
     };
 
-    Ok((parsed.title, link_type, analysis))
+    // Títol: prioritza el curt del LLM; si no, retalla el de la pàgina a ~80 car.
+    let final_title = analysis
+        .title
+        .clone()
+        .or_else(|| parsed.title.clone())
+        .map(|t| clamp_title(&t))
+        .filter(|t| !t.is_empty());
+
+    Ok((final_title, link_type, analysis))
 }
 
 // ---- Embeddings ----

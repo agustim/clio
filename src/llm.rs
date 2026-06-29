@@ -38,6 +38,8 @@ struct RespMsg {
 /// Forma JSON que demanem al model.
 #[derive(Deserialize)]
 struct LlmAnalysis {
+    #[serde(default)]
+    title: String,
     summary: String,
     #[serde(default)]
     tags: Vec<String>,
@@ -58,7 +60,11 @@ impl LlmClient {
             temperature: 0.3,
         };
         let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
-        let mut rb = self.http.post(&url).json(&req);
+        let mut rb = self
+            .http
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
+            .json(&req);
         if let Some(key) = &self.cfg.api_key {
             rb = rb.bearer_auth(key);
         }
@@ -73,11 +79,12 @@ impl LlmClient {
 
     pub async fn analyze(&self, title: &str, text: &str, max_words: usize) -> Result<Analysis> {
         let prompt = format!(
-            "Ets un analista de continguts. Resumeix el text en CATALÀ en menys de {max_words} paraules, \
+            "Ets un analista de continguts. Genera un títol CURT i clar en CATALÀ (màxim 80 \
+             caràcters, sense cometes), resumeix el text en CATALÀ en menys de {max_words} paraules, \
              extreu entre 5 i 10 tags (minuscules, sense accents) i determina el sentiment global.\n\
              Respon NOMÉS amb JSON valid d'aquesta forma exacta:\n\
-             {{\"summary\": \"...\", \"tags\": [\"a\",\"b\"], \"sentiment\": \"positive|neutral|negative\"}}\n\n\
-             TÍTOL: {title}\n\nTEXT:\n{text}"
+             {{\"title\": \"...\", \"summary\": \"...\", \"tags\": [\"a\",\"b\"], \"sentiment\": \"positive|neutral|negative\"}}\n\n\
+             TÍTOL ORIGINAL: {title}\n\nTEXT:\n{text}"
         );
         let req = ChatReq {
             model: &self.cfg.model,
@@ -85,7 +92,11 @@ impl LlmClient {
             temperature: 0.2,
         };
         let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
-        let mut rb = self.http.post(&url).json(&req);
+        let mut rb = self
+            .http
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
+            .json(&req);
         if let Some(key) = &self.cfg.api_key {
             rb = rb.bearer_auth(key);
         }
@@ -108,7 +119,12 @@ impl LlmClient {
             "negative" => Sentiment::Negative,
             _ => Sentiment::Neutral,
         };
+        let title = {
+            let t = parsed.title.trim();
+            if t.is_empty() { None } else { Some(t.to_string()) }
+        };
         Ok(Analysis {
+            title,
             summary: parsed.summary,
             tags: parsed.tags,
             sentiment,

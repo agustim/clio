@@ -68,6 +68,10 @@ pub struct Link {
     pub sentiment: Sentiment,
     pub status: LinkStatus,
     pub co_reporters: Vec<Uuid>,
+    /// Noms d'usuari dels reporters (resolts des de `co_reporters` per a la web).
+    /// No prové d'una columna; s'omple amb `Db::fill_reporters`.
+    #[serde(default)]
+    pub reporters: Vec<String>,
     /// Segona passada (deep): estat, resum profund i stats de codi (repos).
     pub deep_status: DeepStatus,
     pub deep_summary: Option<String>,
@@ -110,6 +114,8 @@ pub struct Report {
 /// Resultat de l'analisi del pipeline (LLM o fallback).
 #[derive(Debug, Clone)]
 pub struct Analysis {
+    /// Títol curt (≤ ~80 car.) generat pel LLM; None => s'usa el títol de la pàgina.
+    pub title: Option<String>,
     pub summary: String,
     pub tags: Vec<String>,
     pub sentiment: Sentiment,

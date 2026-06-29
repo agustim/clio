@@ -37,6 +37,14 @@ pub enum Cmd {
     Generate,
     /// Genera embeddings per als links que en manquin (backfill, requereix LLM)
     Reindex,
+    /// Reprocessa links existents (re-analitza => títols curts nous, tags, etc.)
+    Reprocess {
+        #[arg(long, default_value_t = 1000)]
+        limit: i64,
+        /// Només la primera passada (no clona repos ni re-fa l'anàlisi profunda)
+        #[arg(long)]
+        shallow: bool,
+    },
     /// Commit + push de la web (opt-in, requereix WEB_REPO_URL)
     Push,
 }
@@ -127,6 +135,32 @@ pub async fn run(
             println!("Embeddings generats: {done}/{total}");
             Ok(())
         }
+        Cmd::Reprocess { limit, shallow } => {
+            let ids = state.db.all_link_ids(limit).await?;
+            let total = ids.len();
+            println!("Reprocessant {total} links ({})…", if shallow { "shallow" } else { "shallow + deep" });
+            let (mut ok, mut err) = (0usize, 0usize);
+            for (i, id) in ids.into_iter().enumerate() {
+                let res = if shallow {
+                    let llm = state.llm.as_deref();
+                    let embedder = state.embedder.as_deref();
+                    crate::pipeline::process_link(&state.db, &state.cfg, &state.http, llm, embedder, id).await
+                } else {
+                    state.process_full(id).await
+                };
+                match res {
+                    Ok(_) => {
+                        ok += 1;
+                        if let Some(l) = state.db.link_by_id(id).await? {
+                            println!("  [{}/{}] {}", i + 1, total, l.title.unwrap_or_else(|| l.url.clone()));
+                        }
+                    }
+                    Err(e) => { err += 1; println!("  [{}/{}] error: {e}", i + 1, total); }
+                }
+            }
+            println!("Fet: {ok} ok, {err} errors. Regenera la web amb `generate`.");
+            Ok(())
+        }
         Cmd::Push => {
             webgen::generate(&state.db, &state.cfg).await?;
             webgen::git_push(&state.cfg, "chore: update static web")?;
@@ -167,6 +201,26 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
             }
         });
     }
+
+    // Deploy reactiu: en completar-se l'anàlisi d'un link, regenera + push.
+    // El debounce agrupa una ràfega de links nous en un sol deploy. git_push
+    // fa no-op si links.json no ha canviat, així que CF Pages només reconstrueix
+    // quan hi ha contingut nou de veritat.
+    let deploy_state = state.clone();
+    let debounce = std::time::Duration::from_secs(state.cfg.web_debounce_secs);
+    tokio::spawn(async move {
+        loop {
+            deploy_state.web_dirty.notified().await;
+            tokio::time::sleep(debounce).await;
+            if let Err(e) = webgen::generate(&deploy_state.db, &deploy_state.cfg).await {
+                tracing::warn!(error = %e, "regen per deploy fallida");
+                continue;
+            }
+            if let Err(e) = webgen::git_push(&deploy_state.cfg, "chore: update links") {
+                tracing::warn!(error = %e, "push de deploy fallit");
+            }
+        }
+    });
 
     // Bot en background (stub).
     let bot_state = state.clone();

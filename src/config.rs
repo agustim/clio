@@ -6,6 +6,8 @@ pub struct LlmConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Timeout per crida al LLM (segons). Generació pot trigar molt en models grans.
+    pub timeout_secs: u64,
 }
 
 impl LlmConfig {
@@ -74,6 +76,9 @@ pub struct Config {
     pub queue_workers: usize,
     /// Interval (segons) de regeneració de la web durant `serve`. 0 = desactivat.
     pub web_regen_secs: u64,
+    /// Finestra (segons) per agrupar una ràfega de links nous en un sol
+    /// deploy reactiu. S'aplica després del senyal `web_dirty`.
+    pub web_debounce_secs: u64,
     /// Límits per a la segona passada (clone de repos).
     pub clone_timeout_secs: u64,
     pub clone_max_mb: u64,
@@ -101,6 +106,9 @@ impl Config {
         let web_regen_secs: u64 = get("WEB_REGEN_SECS", "30")
             .parse()
             .map_err(|_| AppError::Config("WEB_REGEN_SECS invalid".into()))?;
+        let web_debounce_secs: u64 = get("WEB_DEBOUNCE_SECS", "60")
+            .parse()
+            .map_err(|_| AppError::Config("WEB_DEBOUNCE_SECS invalid".into()))?;
         let clone_timeout_secs: u64 = get("CLONE_TIMEOUT_SECS", "120")
             .parse()
             .map_err(|_| AppError::Config("CLONE_TIMEOUT_SECS invalid".into()))?;
@@ -115,6 +123,9 @@ impl Config {
         let llm_provider = get("LLM_PROVIDER", "none");
         let llm_base = get("LLM_BASE_URL", "http://localhost:8000/v1");
         let llm_key = opt("LLM_API_KEY");
+        let llm_timeout_secs: u64 = get("LLM_TIMEOUT_SECS", "120")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_TIMEOUT_SECS invalid".into()))?;
 
         // Embeddings: provider propi. Si no s'especifica base_url/api_key,
         // es reusen els del LLM de chat (ergonòmic per a setups d'un sol proveïdor).
@@ -134,6 +145,7 @@ impl Config {
                 model: get("LLM_MODEL", "gpt-3.5-turbo"),
                 base_url: llm_base,
                 api_key: llm_key,
+                timeout_secs: llm_timeout_secs,
             },
             embed,
             git: GitConfig {
@@ -148,6 +160,7 @@ impl Config {
             user_agent: get("USER_AGENT", "Clio-LinkAnalyzer/0.1"),
             queue_workers,
             web_regen_secs,
+            web_debounce_secs,
             clone_timeout_secs,
             clone_max_mb,
         })

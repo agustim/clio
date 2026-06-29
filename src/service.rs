@@ -21,6 +21,8 @@ pub struct AppState {
     pub llm: Option<Arc<LlmClient>>,
     pub embedder: Option<Arc<Embedder>>,
     pub queue: Queue,
+    /// Senyal: el contingut web ha canviat i cal regenerar/desplegar.
+    pub web_dirty: Arc<tokio::sync::Notify>,
 }
 
 pub struct ReportOutcome {
@@ -42,7 +44,15 @@ impl AppState {
         let llm = pipeline::build_llm(&cfg, http.clone());
         let embedder = crate::embed::build(&cfg.embed, http.clone())?.map(Arc::new);
         let (queue, rx) = queue::start();
-        let state = Self { db, cfg: Arc::new(cfg), http, llm, embedder, queue };
+        let state = Self {
+            db,
+            cfg: Arc::new(cfg),
+            http,
+            llm,
+            embedder,
+            queue,
+            web_dirty: Arc::new(tokio::sync::Notify::new()),
+        };
         Ok((state, rx))
     }
 

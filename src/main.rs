@@ -11,6 +11,7 @@ mod normalize;
 mod pipeline;
 mod queue;
 mod service;
+mod social;
 mod telegram;
 mod webgen;
 

@@ -243,7 +243,8 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 }
 .card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow); }
 .card-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
-.card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em; }
+.card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .card h2 a { color: var(--fg); text-decoration: none; }
 .card h2 a:hover { color: var(--accent); }
 
@@ -277,6 +278,40 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .deep summary { cursor: pointer; color: var(--accent); font-weight: 500; user-select: none; }
 .deep p { color: var(--muted); line-height: 1.5; margin: .5rem 0 0; }
 .deep-pending { font-size: .76rem; color: var(--faint); font-style: italic; }
+
+/* Markdown de l'anàlisi profunda */
+.deep-md { color: var(--muted); line-height: 1.55; margin-top: .5rem; }
+.deep-md h1, .deep-md h2, .deep-md h3, .deep-md h4 { color: var(--fg); margin: .8rem 0 .35rem; line-height: 1.3; }
+.deep-md h1 { font-size: 1.02rem; } .deep-md h2 { font-size: .96rem; } .deep-md h3, .deep-md h4 { font-size: .9rem; }
+.deep-md p { margin: .5rem 0; }
+.deep-md ul { margin: .4rem 0; padding-left: 1.2rem; }
+.deep-md li { margin: .15rem 0; }
+.deep-md a { color: var(--accent); }
+.deep-md code { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; padding: .05rem .3rem; font-size: .85em; }
+.deep-md pre { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; padding: .6rem .8rem; overflow-x: auto; }
+.deep-md pre code { background: none; border: none; padding: 0; }
+.deep-md strong { color: var(--fg); }
+
+/* Reporters (qui ha enviat l'enllaç) */
+.reporters { display: flex; flex-wrap: wrap; gap: .25rem; justify-content: flex-end; }
+.chip.user { font-size: .72rem; padding: .12rem .45rem; }
+.chip.user:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Novetats */
+.badge-new {
+  flex: none; font-size: .62rem; font-weight: 700; letter-spacing: .06em;
+  padding: .18rem .42rem; border-radius: 6px;
+  color: var(--accent-ink); background: var(--accent);
+}
+.card.is-new { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.card.is-new::before {
+  content: ""; position: absolute; inset: 0; border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent); pointer-events: none;
+}
+.new-toggle { cursor: pointer; user-select: none; transition: color var(--transition); }
+.new-toggle:hover { color: var(--fg); }
+.new-toggle.on { color: var(--accent); }
+.new-toggle.on b { color: var(--accent); }
 
 /* ---- Cor / personalització ---- */
 .card-top-right { display: flex; align-items: center; gap: .45rem; flex: none; }
@@ -312,9 +347,25 @@ const APP_JS: &str = r#""use strict";
 // Dades: incrustades a data/links.js (window.__LINKS__) per funcionar via file://.
 // Fallback a fetch si s'està servint per HTTP i no hi ha incrustat.
 let ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
-let activeTag = null;
+let activeTag = null;   // filtre per tag (#tag:xxx)
+let activeUser = null;  // filtre per reporter (#at:xxx)
+let onlyNew = false;    // mostra només novetats (links no vistos)
 
 const $ = (id) => document.getElementById(id);
+
+// ---- Novetats: marca de temps de l'última visita (cookie) ----
+// Es captura a l'arrencada (abans de rerenderitzar) per poder ressaltar els
+// links creats després; després s'actualitza a "ara".
+function readLastVisit() {
+  const m = document.cookie.match(/(?:^|;\s*)clio_seen=([^;]*)/);
+  return m ? (parseInt(decodeURIComponent(m[1]), 10) || 0) : 0;
+}
+function writeLastVisit(ms) {
+  document.cookie = 'clio_seen=' + ms + '; path=/; max-age=31536000; SameSite=Lax';
+}
+const LAST_VISIT = readLastVisit();
+function linkTime(l) { const t = Date.parse(l.created_at); return isNaN(t) ? 0 : t; }
+function isNew(l) { return LAST_VISIT > 0 && linkTime(l) > LAST_VISIT; }
 
 // ---- Personalització per "cors" (sense usuaris; estat desat a cookie) ----
 // La cookie guarda NOMÉS els ids marcats; el vector de l'usuari (centroide)
@@ -371,6 +422,57 @@ function cosine(a, b) {
 
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// Renderitzador de Markdown minimal i segur: s'escapa primer l'HTML i després
+// es reintrodueixen només les etiquetes generades aquí. Cobreix el subconjunt
+// que produeix el LLM: titols, negreta/cursiva, codi, llistes, enllaços, cites.
+function mdInline(s) {
+  return esc(s)
+    .replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function md(src) {
+  const lines = (src || '').split(/\r?\n/);
+  const out = [];
+  let inList = false, inCode = false, para = [];
+  const flushPara = () => { if (para.length) { out.push('<p>' + para.join(' ') + '</p>'); para = []; } };
+  const flushList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (let raw of lines) {
+    if (/^```/.test(raw)) {
+      flushPara(); flushList();
+      if (!inCode) { out.push('<pre><code>'); inCode = true; }
+      else { out.push('</code></pre>'); inCode = false; }
+      continue;
+    }
+    if (inCode) { out.push(esc(raw)); continue; }
+    const line = raw.trim();
+    if (!line) { flushPara(); flushList(); continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { flushPara(); flushList(); const n = h[1].length; out.push('<h' + n + '>' + mdInline(h[2]) + '</h' + n + '>'); continue; }
+    const li = line.match(/^[-*+]\s+(.*)$/);
+    if (li) { flushPara(); if (!inList) { out.push('<ul>'); inList = true; } out.push('<li>' + mdInline(li[1]) + '</li>'); continue; }
+    para.push(mdInline(line));
+  }
+  if (inCode) out.push('</code></pre>');
+  flushPara(); flushList();
+  return out.join('\n');
+}
+
+// ---- Enrutament per hash: #tag:xxx o #at:usuari ----
+function applyHash() {
+  const h = decodeURIComponent((location.hash || '').replace(/^#/, '')).trim();
+  activeTag = null; activeUser = null;
+  if (h.toLowerCase().startsWith('tag:')) activeTag = h.slice(4).toLowerCase();
+  else if (h.toLowerCase().startsWith('at:')) activeUser = h.slice(3).toLowerCase();
+}
+function setHash(h) {
+  if (location.hash.replace(/^#/, '') === h) { onHashChange(); }
+  else location.hash = h;
+}
+function onHashChange() { applyHash(); buildFilters(); render(); }
+
 // ---- Tema fosc/clar ----
 function initTheme() {
   const saved = localStorage.getItem('clio-theme');
@@ -390,11 +492,20 @@ function buildFilters() {
   const top = Object.entries(counts).sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0])).slice(0,24);
   const box = $('filters');
   box.innerHTML = '';
+  // Filtre actiu per usuari (#at:): chip destacable i removible.
+  if (activeUser) {
+    const u = document.createElement('span');
+    u.className = 'chip active';
+    u.textContent = '@' + activeUser + ' ✕';
+    u.title = "Enllaços enviats per " + activeUser + ' (clica per treure)';
+    u.onclick = () => setHash('');
+    box.appendChild(u);
+  }
   top.forEach(([tag, n]) => {
     const c = document.createElement('span');
     c.className = 'chip' + (tag===activeTag ? ' active' : '');
     c.textContent = '#' + tag + ' · ' + n;
-    c.onclick = () => { activeTag = (activeTag===tag ? null : tag); buildFilters(); render(); };
+    c.onclick = () => setHash(activeTag===tag ? '' : 'tag:' + tag);
     box.appendChild(c);
   });
 }
@@ -417,7 +528,7 @@ function deepBlock(l) {
   if (l.deep_summary && l.deep_status === 'done') {
     parts.push(`<details class="deep">
       <summary>🔬 Anàlisi profunda</summary>
-      <p>${esc(l.deep_summary)}</p>
+      <div class="deep-md">${md(l.deep_summary)}</div>
     </details>`);
   } else if (l.deep_status === 'pending' || l.deep_status === 'processing') {
     parts.push(`<div class="deep-pending">🔬 Anàlisi profunda en curs…</div>`);
@@ -434,6 +545,8 @@ function render() {
 
   const items = ALL.filter(l => {
     if (activeTag && !(l.tags||[]).includes(activeTag)) return false;
+    if (activeUser && !(l.reporters||[]).some(u => u.toLowerCase() === activeUser)) return false;
+    if (onlyNew && !isNew(l)) return false;
     if (typeF && l.link_type !== typeF) return false;
     if (sentF && l.sentiment !== sentF) return false;
     if (!q) return true;
@@ -450,17 +563,20 @@ function render() {
   renderPerso();
 
   items.forEach(l => {
-    const reporters = (l.co_reporters||[]).length;
+    const reps = l.reporters || [];
     const type = esc(l.link_type || 'other');
     const sent = esc(l.sentiment || 'neutral');
     const tags = (l.tags||[]).slice(0,8)
       .map(t => `<span class="chip" data-tag="${esc(t)}">#${esc(t)}</span>`).join('');
+    const users = reps.slice(0,6)
+      .map(u => `<span class="chip user" data-user="${esc(u)}">@${esc(u)}</span>`).join('');
     const card = document.createElement('article');
-    card.className = 'card';
+    card.className = 'card' + (isNew(l) ? ' is-new' : '');
     card.innerHTML = `
       <div class="card-top">
         <h2><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title || l.url)}</a></h2>
         <div class="card-top-right">
+          ${isNew(l) ? '<span class="badge-new" title="Nou des de la teva última visita">NOU</span>' : ''}
           <span class="badge t-${type}">${type}</span>
           ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
         </div>
@@ -470,10 +586,13 @@ function render() {
       ${deepBlock(l)}
       <div class="meta">
         <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
-        <span title="Reporters">👥 ${reporters}</span>
+        <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
       </div>`;
     card.querySelectorAll('.tags .chip').forEach(ch => {
-      ch.onclick = () => { activeTag = ch.dataset.tag; buildFilters(); render(); };
+      ch.onclick = () => setHash('tag:' + ch.dataset.tag);
+    });
+    card.querySelectorAll('.reporters .user').forEach(ch => {
+      ch.onclick = () => setHash('at:' + ch.dataset.user.toLowerCase());
     });
     const hb = card.querySelector('.heart');
     if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
@@ -500,10 +619,18 @@ function renderStats() {
   const total = ALL.length;
   const done = ALL.filter(l => l.status === 'done').length;
   const tags = new Set(); ALL.forEach(l => (l.tags||[]).forEach(t => tags.add(t)));
-  $('stats').innerHTML =
+  const newCount = ALL.filter(isNew).length;
+  let html =
     `<span><b>${total}</b> enllaços</span>` +
     `<span><b>${done}</b> processats</span>` +
     `<span><b>${tags.size}</b> tags</span>`;
+  if (newCount) {
+    html += `<span id="new-toggle" class="new-toggle${onlyNew ? ' on' : ''}" ` +
+      `title="Mostra només novetats">✨ <b>${newCount}</b> novetats</span>`;
+  }
+  $('stats').innerHTML = html;
+  const nt = $('new-toggle');
+  if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); };
 }
 
 async function maybeFetch() {
@@ -514,11 +641,15 @@ async function maybeFetch() {
 (async function init() {
   initTheme();
   await maybeFetch();
+  applyHash();
   renderStats();
   buildFilters();
   render();
+  window.addEventListener('hashchange', onHashChange);
   $('search').addEventListener('input', render);
   $('type-filter').addEventListener('change', render);
   $('sent-filter').addEventListener('change', render);
+  // Marca aquesta visita: els links nous deixaran de ser-ho a la pròxima.
+  writeLastVisit(Date.now());
 })();
 "#;
