@@ -439,8 +439,15 @@ function hasToken() { return API_LIVE && !!getToken(); }
 function isAdmin() { return API_LIVE && ME && ME.role === 'admin'; }
 
 async function probeApi() {
-  try { const r = await fetch('/api/v1/ping', { cache: 'no-store' }); API_LIVE = r.ok; }
-  catch (e) { API_LIVE = false; }
+  // No n'hi ha prou amb r.ok: hostings estàtics (Cloudflare Pages, etc.) tornen
+  // 200 amb l'HTML de fallback per a rutes desconegudes. Cal confirmar que el cos
+  // és el JSON del servei viu ({ serve: true }).
+  try {
+    const r = await fetch('/api/v1/ping', { cache: 'no-store' });
+    if (!r.ok) { API_LIVE = false; return; }
+    const j = await r.json().catch(() => null);
+    API_LIVE = !!(j && j.serve === true);
+  } catch (e) { API_LIVE = false; }
 }
 
 async function api(method, path, body) {
