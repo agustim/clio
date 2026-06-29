@@ -73,7 +73,10 @@ pub struct Config {
     pub admin_chat_id: Option<i64>,
     pub public_dir: String,
     pub max_link_size_bytes: usize,
+    /// Límit de paraules per a l'anàlisi profunda (deep) i fallbacks d'article.
     pub summary_max_words: usize,
+    /// Límit de caràcters per al resum curt (descripció a la targeta web).
+    pub summary_max_chars: usize,
     pub user_agent: String,
     /// Nombre de workers concurrents de la cua d'anàlisi.
     pub queue_workers: usize,
@@ -103,6 +106,9 @@ impl Config {
         let summary_max_words: usize = get("SUMMARY_MAX_WORDS", "300")
             .parse()
             .map_err(|_| AppError::Config("SUMMARY_MAX_WORDS invalid".into()))?;
+        let summary_max_chars: usize = get("SUMMARY_MAX_CHARS", "150")
+            .parse()
+            .map_err(|_| AppError::Config("SUMMARY_MAX_CHARS invalid".into()))?;
         let queue_workers: usize = get("QUEUE_WORKERS", "4")
             .parse()
             .map_err(|_| AppError::Config("QUEUE_WORKERS invalid".into()))?;
@@ -161,6 +167,7 @@ impl Config {
             public_dir: get("PUBLIC_DIR", "public"),
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
+            summary_max_chars,
             user_agent: get("USER_AGENT", "Clio-LinkAnalyzer/0.1"),
             queue_workers,
             web_regen_secs,

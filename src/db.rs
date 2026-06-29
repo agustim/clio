@@ -62,6 +62,7 @@ impl Db {
             ("002_deep", include_str!("../migrations/002_deep.sql")),
             ("003_embeddings", include_str!("../migrations/003_embeddings.sql")),
             ("004_telegram", include_str!("../migrations/004_telegram.sql")),
+            ("005_social", include_str!("../migrations/005_social.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -73,13 +74,18 @@ impl Db {
             if applied.is_some() {
                 continue;
             }
+            // Una migració s'executa sobre una sola connexió: les PRAGMA per-connexió
+            // (p.ex. foreign_keys=OFF per a reconstruir taules amb FK) han de valer
+            // per a tots els statements de la migració.
+            let mut conn = self.pool.acquire().await?;
             for stmt in sql.split(';') {
                 let s = stmt.trim();
                 if s.is_empty() {
                     continue;
                 }
-                sqlx::query(s).execute(&self.pool).await?;
+                sqlx::query(s).execute(&mut *conn).await?;
             }
+            drop(conn);
             sqlx::query("INSERT INTO _migrations (name, applied_at) VALUES (?, ?)")
                 .bind(name)
                 .bind(now_str())

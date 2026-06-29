@@ -77,10 +77,11 @@ impl LlmClient {
             .ok_or_else(|| AppError::Pipeline("llm: empty choices".into()))
     }
 
-    pub async fn analyze(&self, title: &str, text: &str, max_words: usize) -> Result<Analysis> {
+    pub async fn analyze(&self, title: &str, text: &str, max_chars: usize) -> Result<Analysis> {
         let prompt = format!(
             "Ets un analista de continguts. Genera un títol CURT i clar en CATALÀ (màxim 80 \
-             caràcters, sense cometes), resumeix el text en CATALÀ en menys de {max_words} paraules, \
+             caràcters, sense cometes), resumeix el text en CATALÀ en màxim {max_chars} caràcters \
+             (frase completa, sense talls ni punts suspensius), \
              extreu entre 5 i 10 tags (minuscules, sense accents) i determina el sentiment global.\n\
              Respon NOMÉS amb JSON valid d'aquesta forma exacta:\n\
              {{\"title\": \"...\", \"summary\": \"...\", \"tags\": [\"a\",\"b\"], \"sentiment\": \"positive|neutral|negative\"}}\n\n\

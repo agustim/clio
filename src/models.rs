@@ -30,7 +30,7 @@ macro_rules! str_enum {
 str_enum!(UserRole { Admin => "admin", User => "user" }, default = User);
 str_enum!(LinkType {
     News => "news", Repo => "repo", Article => "article",
-    Video => "video", Blog => "blog", Other => "other"
+    Video => "video", Blog => "blog", Social => "social", Other => "other"
 }, default = Other);
 str_enum!(Sentiment {
     Positive => "positive", Neutral => "neutral", Negative => "negative"
@@ -99,7 +99,7 @@ impl Link {
     pub fn deep_applicable(&self) -> bool {
         matches!(
             self.link_type,
-            LinkType::Repo | LinkType::Article | LinkType::Blog | LinkType::News
+            LinkType::Repo | LinkType::Article | LinkType::Blog | LinkType::News | LinkType::Video
         )
     }
 }

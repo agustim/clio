@@ -128,6 +128,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <option value="article">Article</option>
         <option value="video">Video</option>
         <option value="blog">Blog</option>
+        <option value="social">Social</option>
         <option value="other">Other</option>
       </select>
       <select id="sent-filter" class="select" aria-label="Filtra per sentiment">
@@ -222,7 +223,11 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .stats { max-width: var(--maxw); margin: .85rem auto 0; display: flex; gap: 1.2rem; font-size: .82rem; color: var(--muted); }
 .stats b { color: var(--fg); }
 
-.filters { max-width: var(--maxw); margin: .7rem auto 0; display: flex; flex-wrap: wrap; gap: .4rem; }
+.filters { max-width: var(--maxw); margin: .7rem auto 0; display: none; flex-wrap: wrap; gap: .4rem; }
+.filters.open { display: flex; }
+.tags-toggle { cursor: pointer; user-select: none; transition: color var(--transition); }
+.tags-toggle:hover { color: var(--fg); }
+.tags-toggle.on, .tags-toggle.on b { color: var(--accent); }
 
 /* ---- Chips ---- */
 .chip {
@@ -261,10 +266,10 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .badge.t-article { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .badge.t-video   { color: #ff6b7a; background: color-mix(in srgb, #ff6b7a 16%, transparent); }
 .badge.t-blog    { color: #45d49a; background: color-mix(in srgb, #45d49a 16%, transparent); }
+.badge.t-social  { color: #4aa8ff; background: color-mix(in srgb, #4aa8ff 16%, transparent); }
 .badge.t-other   { color: var(--muted); background: var(--bg-soft); }
 
-.summary { color: var(--muted); font-size: .9rem; line-height: 1.5; margin: 0;
-  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.summary { color: var(--muted); font-size: .9rem; line-height: 1.5; margin: 0; }
 .tags { display: flex; flex-wrap: wrap; gap: .3rem; }
 .meta { display: flex; align-items: center; justify-content: space-between; font-size: .8rem; color: var(--muted); margin-top: auto; padding-top: .3rem; border-top: 1px solid var(--border); }
 .sent { display: inline-flex; align-items: center; gap: .35rem; font-weight: 500; }
@@ -280,6 +285,14 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .codestats .lang i { color: var(--accent); font-style: normal; }
 .deep { border-top: 1px dashed var(--border); padding-top: .5rem; font-size: .85rem; }
 .deep summary { cursor: pointer; color: var(--accent); font-weight: 500; user-select: none; }
+
+/* Detalls de la targeta (tags + info) plegables */
+.card-extra { border-top: 1px dashed var(--border); padding-top: .5rem; }
+.card-extra > summary { cursor: pointer; color: var(--muted); font-size: .82rem; font-weight: 500; user-select: none; }
+.card-extra > summary:hover { color: var(--fg); }
+.card-extra[open] > summary { margin-bottom: .5rem; }
+.card-extra .tags { margin-bottom: .5rem; }
+.card-extra .meta { margin-top: 0; }
 .deep p { color: var(--muted); line-height: 1.5; margin: .5rem 0 0; }
 .deep-pending { font-size: .76rem; color: var(--faint); font-style: italic; }
 
@@ -410,6 +423,7 @@ let ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
 let activeTag = null;   // filtre per tag (#tag:xxx)
 let activeUser = null;  // filtre per reporter (#at:xxx)
 let onlyNew = false;    // mostra només novetats (links no vistos)
+let filtersOpen = false; // llistat de tags general plegat per defecte
 
 const $ = (id) => document.getElementById(id);
 
@@ -676,6 +690,14 @@ function cosine(a, b) {
 
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// Resum curt: explicació de què és, màxim 150 caràcters, sense punts suspensius.
+// L'anàlisi profunda cobreix el text llarg.
+function summaryText(s) {
+  const t = (s || '').trim();
+  if (!t) return 'Sense resum disponible.';
+  return t.length > 150 ? t.slice(0, 150).trimEnd() : t;
+}
+
 // Renderitzador de Markdown minimal i segur: s'escapa primer l'HTML i després
 // es reintrodueixen només les etiquetes generades aquí. Cobreix el subconjunt
 // que produeix el LLM: titols, negreta/cursiva, codi, llistes, enllaços, cites.
@@ -746,6 +768,11 @@ function buildFilters() {
   const top = Object.entries(counts).sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0])).slice(0,24);
   const box = $('filters');
   box.innerHTML = '';
+  // Llistat general plegat per defecte: només visible si s'obre des del toggle
+  // de tags o si hi ha un filtre actiu (per poder treure'l).
+  const show = filtersOpen || activeTag || activeUser;
+  box.classList.toggle('open', !!show);
+  if (!show) return;
   // Filtre actiu per usuari (#at:): chip destacable i removible.
   if (activeUser) {
     const u = document.createElement('span');
@@ -766,19 +793,37 @@ function buildFilters() {
 
 const SENT_LABEL = { positive: 'Positiu', neutral: 'Neutral', negative: 'Negatiu' };
 
-// Bloc de la segona passada (deep): anàlisi profunda + stats de codi.
-function deepBlock(l) {
-  const parts = [];
+// Info del repositori o del vídeo (stats): es mostra dins "Detalls".
+function repoBlock(l) {
   const cs = l.code_stats;
-  if (cs && typeof cs === 'object') {
-    const langs = (cs.top_languages || []).slice(0,4)
-      .map(x => `<span class="lang">${esc(x.lang)} <i>${x.loc}</i></span>`).join('');
-    parts.push(`<div class="codestats">
+  if (!cs || typeof cs !== 'object') return '';
+  // Vídeos: canal + durada + si té transcripció.
+  if (cs.channel !== undefined || cs.duration_secs !== undefined) {
+    const parts = [];
+    if (cs.channel) parts.push(`<span title="Canal">📺 ${esc(cs.channel)}</span>`);
+    if (cs.duration_secs) parts.push(`<span title="Durada">⏱ ${fmtDur(cs.duration_secs)}</span>`);
+    if (cs.has_transcript) parts.push(`<span title="Transcripció disponible">📝 transcripció</span>`);
+    return `<div class="codestats">${parts.join('')}</div>`;
+  }
+  // Repos: fitxers + LOC + llenguatges.
+  const langs = (cs.top_languages || []).slice(0,4)
+    .map(x => `<span class="lang">${esc(x.lang)} <i>${x.loc}</i></span>`).join('');
+  return `<div class="codestats">
       <span title="Fitxers de codi">📄 ${cs.files||0}</span>
       <span title="Línies de codi">⌁ ${cs.loc||0} LOC</span>
       <span class="langs">${langs}</span>
-    </div>`);
-  }
+    </div>`;
+}
+
+function fmtDur(s) {
+  s = parseInt(s, 10) || 0;
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  return (h ? h+'h ' : '') + (m ? m+'m ' : '') + (h ? '' : sec+'s');
+}
+
+// Bloc de la segona passada (deep): anàlisi profunda en text.
+function deepBlock(l) {
+  const parts = [];
   if (l.deep_summary && l.deep_status === 'done') {
     parts.push(`<details class="deep">
       <summary>🔬 Anàlisi profunda</summary>
@@ -800,7 +845,6 @@ function render() {
   const items = ALL.filter(l => {
     if (activeTag && !(l.tags||[]).includes(activeTag)) return false;
     if (activeUser && !(l.reporters||[]).some(u => u.toLowerCase() === activeUser)) return false;
-    if (onlyNew && !isNew(l)) return false;
     if (typeF && l.link_type !== typeF) return false;
     if (sentF && l.sentiment !== sentF) return false;
     if (!q) return true;
@@ -810,9 +854,13 @@ function render() {
   // Ordre personalitzat: per afinitat (cosine) amb el centroide dels cors.
   // Sense cors, es manté l'ordre per defecte del backend (updated_at DESC).
   const cen = centroid();
-  if (cen) {
-    items.forEach(l => { const v = vecOf(l); l.__score = v ? cosine(v, cen) : -1; });
-    items.sort((a, b) => b.__score - a.__score);
+  if (cen) items.forEach(l => { const v = vecOf(l); l.__score = v ? cosine(v, cen) : -1; });
+  if (onlyNew || cen) {
+    items.sort((a, b) => {
+      // Amb "novetats" actiu: nous primer, antics després; cada grup per interès.
+      if (onlyNew) { const d = (isNew(b)?1:0) - (isNew(a)?1:0); if (d) return d; }
+      return cen ? b.__score - a.__score : 0;
+    });
   }
   renderPerso();
 
@@ -835,13 +883,17 @@ function render() {
           ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
         </div>
       </div>
-      <p class="summary">${esc(l.summary || 'Sense resum disponible.')}</p>
-      <div class="tags">${tags}</div>
+      <p class="summary">${esc(summaryText(l.summary))}</p>
       ${deepBlock(l)}
-      <div class="meta">
-        <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
-        <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
-      </div>
+      <details class="card-extra">
+        <summary>Detalls</summary>
+        ${repoBlock(l)}
+        <div class="tags">${tags}</div>
+        <div class="meta">
+          <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
+          <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
+        </div>
+      </details>
       ${hasToken() ? `<div class="actions">
         <button class="act act-refresh" data-id="${esc(l.id)}" title="Reforça: torna a analitzar">↻ Refer</button>
         <button class="act act-delete" data-id="${esc(l.id)}" title="Dona de baixa aquest link">🗑 Baixa</button>
@@ -885,12 +937,15 @@ function renderStats() {
   let html =
     `<span><b>${total}</b> enllaços</span>` +
     `<span><b>${done}</b> processats</span>` +
-    `<span><b>${tags.size}</b> tags</span>`;
+    `<span id="tags-toggle" class="tags-toggle${filtersOpen ? ' on' : ''}" ` +
+      `title="Mostra/amaga el llistat de tags"># <b>${tags.size}</b> tags</span>`;
   if (newCount) {
     html += `<span id="new-toggle" class="new-toggle${onlyNew ? ' on' : ''}" ` +
       `title="Mostra només novetats">✨ <b>${newCount}</b> novetats</span>`;
   }
   $('stats').innerHTML = html;
+  const tt = $('tags-toggle');
+  if (tt) tt.onclick = () => { filtersOpen = !filtersOpen; renderStats(); buildFilters(); };
   const nt = $('new-toggle');
   if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); };
 }

@@ -26,6 +26,7 @@ pub async fn process_deep(
         LinkType::Article | LinkType::Blog | LinkType::News => {
             deep_article(cfg, http, llm, &link.url).await.map(|s| (s, None))
         }
+        LinkType::Video => deep_video(cfg, llm, &link.url).await,
         _ => Ok(("(no aplica)".to_string(), None)),
     };
 
@@ -97,33 +98,67 @@ async fn deep_repo(
     Ok((summary, Some(stats)))
 }
 
+/// Globs de fitxers que ens interessen al checkout sparse (codi + readme).
+/// Evita materialitzar binaris grans (datasets, models, vídeos) que disparen
+/// el límit de mida i no aporten res a l'anàlisi.
+const SPARSE_GLOBS: &[&str] = &[
+    "*.rs", "*.py", "*.js", "*.mjs", "*.cjs", "*.ts", "*.tsx", "*.jsx", "*.go",
+    "*.java", "*.kt", "*.c", "*.h", "*.cpp", "*.cc", "*.hpp", "*.cxx", "*.cs",
+    "*.rb", "*.php", "*.swift", "*.scala", "*.sh", "*.bash", "*.html", "*.css",
+    "*.scss", "*.sass", "*.sql", "*.md", "*.toml", "*.yaml", "*.yml", "*.json",
+    "README*", "readme*", "LICENSE*",
+];
+
+/// Clona el repo en mode parcial (blobless) i sparse: només es baixen els blobs
+/// dels fitxers de codi/readme, no els binaris grans. Així repos enormes (per
+/// assets) caben sota `clone_max_mb`.
 async fn clone_repo(cfg: &Config, url: &str, dest: &Path) -> Result<()> {
     if !url.starts_with("https://") {
         return Err(AppError::Pipeline("clone: només https".into()));
     }
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args([
-        "clone",
-        "--depth",
-        "1",
-        "--no-recurse-submodules",
-        "--quiet",
-        url,
-    ])
-    .arg(dest)
-    // Evita que git demani credencials de forma interactiva.
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env("GIT_LFS_SKIP_SMUDGE", "1");
 
+    // 1. Clone blobless, sparse, sense checkout encara.
+    run_git(
+        cfg,
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--no-recurse-submodules",
+            "--filter=blob:none",
+            "--sparse",
+            "--no-checkout",
+            "--quiet",
+            url,
+            dest.to_str().unwrap_or_default(),
+        ],
+    )
+    .await?;
+
+    // 2. Defineix el patró sparse (no-cone, estil gitignore = inclou).
+    let mut sparse_args: Vec<&str> = vec!["-C", dest.to_str().unwrap_or_default(), "sparse-checkout", "set", "--no-cone"];
+    sparse_args.extend_from_slice(SPARSE_GLOBS);
+    run_git(cfg, &sparse_args).await?;
+
+    // 3. Checkout: baixa només els blobs dels fitxers inclosos.
+    run_git(cfg, &["-C", dest.to_str().unwrap_or_default(), "checkout", "--quiet"]).await?;
+    Ok(())
+}
+
+/// Executa `git` amb timeout, prompt de credencials desactivat i LFS saltat.
+async fn run_git(cfg: &Config, args: &[&str]) -> Result<()> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LFS_SKIP_SMUDGE", "1");
     let fut = cmd.output();
     let out = tokio::time::timeout(Duration::from_secs(cfg.clone_timeout_secs), fut)
         .await
-        .map_err(|_| AppError::Pipeline("clone: timeout".into()))?
-        .map_err(|e| AppError::Pipeline(format!("clone spawn: {e}")))?;
-
+        .map_err(|_| AppError::Pipeline("git: timeout".into()))?
+        .map_err(|e| AppError::Pipeline(format!("git spawn: {e}")))?;
     if !out.status.success() {
         return Err(AppError::Pipeline(format!(
-            "clone failed: {}",
+            "git failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
@@ -321,6 +356,164 @@ async fn deep_article(
         None => article_fallback(&parsed.text, cfg.summary_max_words * 2),
     };
     Ok(summary)
+}
+
+// ---------- VÍDEOS ----------
+
+/// Deep d'un vídeo (YouTube/Vimeo): extreu metadades + transcripció amb yt-dlp
+/// i en fa un resum amb el LLM. Retorna també `code_stats`-style amb durada/canal.
+async fn deep_video(
+    cfg: &Config,
+    llm: Option<&LlmClient>,
+    url: &str,
+) -> Result<(String, Option<Value>)> {
+    let meta = ytdlp_meta(cfg, url).await?;
+    let transcript = ytdlp_transcript(cfg, url).await.unwrap_or_default();
+
+    let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let channel = meta
+        .get("channel")
+        .or_else(|| meta.get("uploader"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let description = meta.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let duration = meta.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+
+    // Material per al LLM: transcripció si n'hi ha, si no la descripció.
+    let body: String = if !transcript.is_empty() {
+        transcript.chars().take(16000).collect()
+    } else {
+        description.chars().take(8000).collect()
+    };
+
+    let summary = match llm {
+        Some(client) if !body.trim().is_empty() => {
+            let prompt = format!(
+                "Aquest és un vídeo titulat «{title}» del canal «{channel}». A partir de la \
+                 seva {} següent, fes un resum detallat en CATALÀ (punts clau i conclusions) \
+                 en menys de {} paraules:\n\n{body}",
+                if transcript.is_empty() { "descripció" } else { "transcripció" },
+                cfg.summary_max_words * 2,
+            );
+            match client.complete(&prompt).await {
+                Ok(s) => s.trim().to_string(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "llm deep video failed, fallback");
+                    article_fallback(&body, cfg.summary_max_words * 2)
+                }
+            }
+        }
+        _ => article_fallback(&body, cfg.summary_max_words * 2),
+    };
+
+    let stats = json!({
+        "channel": channel,
+        "duration_secs": duration,
+        "has_transcript": !transcript.is_empty(),
+    });
+    Ok((summary, Some(stats)))
+}
+
+/// Crida yt-dlp `--dump-single-json` per a metadades (sense baixar el vídeo).
+async fn ytdlp_meta(cfg: &Config, url: &str) -> Result<Value> {
+    let out = run_ytdlp(cfg, &["--dump-single-json", "--no-warnings", "--skip-download", url]).await?;
+    serde_json::from_slice(&out).map_err(|e| AppError::Pipeline(format!("yt-dlp json: {e}")))
+}
+
+/// Baixa els subtítols (auto o manuals) i en retorna el text pla.
+async fn ytdlp_transcript(cfg: &Config, url: &str) -> Result<String> {
+    let dir = std::env::temp_dir().join(format!("clio-yt-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).ok();
+    let guard = TmpGuard(dir.clone());
+    let out_tpl = dir.join("sub.%(ext)s");
+
+    run_ytdlp(
+        cfg,
+        &[
+            "--skip-download",
+            "--write-auto-subs",
+            "--write-subs",
+            "--sub-langs",
+            "ca,es,en",
+            "--sub-format",
+            "vtt",
+            "--no-warnings",
+            "-o",
+            out_tpl.to_str().unwrap_or("sub"),
+            url,
+        ],
+    )
+    .await?;
+
+    // Agafa el primer .vtt generat i el converteix a text pla.
+    let entry = std::fs::read_dir(&dir)
+        .ok()
+        .and_then(|mut e| e.find_map(|x| x.ok().map(|x| x.path()).filter(|p| {
+            p.extension().and_then(|x| x.to_str()) == Some("vtt")
+        })));
+    let path = entry.ok_or_else(|| AppError::Pipeline("sense subtítols".into()))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| AppError::Pipeline(format!("read sub: {e}")))?;
+    drop(guard);
+    Ok(vtt_to_text(&raw))
+}
+
+/// Executa yt-dlp amb timeout i retorna l'stdout.
+async fn run_ytdlp(cfg: &Config, args: &[&str]) -> Result<Vec<u8>> {
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    cmd.args(args);
+    let fut = cmd.output();
+    let out = tokio::time::timeout(Duration::from_secs(cfg.clone_timeout_secs), fut)
+        .await
+        .map_err(|_| AppError::Pipeline("yt-dlp: timeout".into()))?
+        .map_err(|e| AppError::Pipeline(format!("yt-dlp spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(AppError::Pipeline(format!(
+            "yt-dlp failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
+/// Converteix un VTT/SRT a text pla: treu timestamps, tags i línies repetides.
+fn vtt_to_text(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut last = String::new();
+    for line in raw.lines() {
+        let l = line.trim();
+        if l.is_empty()
+            || l == "WEBVTT"
+            || l.starts_with("Kind:")
+            || l.starts_with("Language:")
+            || l.contains("-->")
+            || l.chars().all(|c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        // Treu tags inline tipus <00:00:01.000> o <c>.
+        let clean = strip_tags(l);
+        let clean = clean.trim();
+        if clean.is_empty() || clean == last {
+            continue;
+        }
+        last = clean.to_string();
+        out.push(clean.to_string());
+    }
+    out.join(" ")
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn article_fallback(text: &str, max_words: usize) -> String {

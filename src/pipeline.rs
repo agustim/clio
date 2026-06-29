@@ -87,6 +87,15 @@ pub fn classify(url: &str, og_type: Option<&str>) -> LinkType {
     if u.contains("youtube.com") || u.contains("youtu.be") || u.contains("vimeo.com") {
         return LinkType::Video;
     }
+    // Xarxes socials: auth-walled, no fem deep; classifiquem per filtre/icona.
+    // Match per host (no substring: "ex.com" no és "x.com").
+    const SOCIAL: &[&str] = &[
+        "instagram.com", "tiktok.com", "twitter.com", "x.com",
+        "threads.net", "facebook.com", "linkedin.com",
+    ];
+    if SOCIAL.iter().any(|d| host_is(&u, d)) {
+        return LinkType::Social;
+    }
     if let Some(t) = og_type {
         if t.contains("article") {
             return LinkType::Article;
@@ -102,6 +111,25 @@ pub fn classify(url: &str, og_type: Option<&str>) -> LinkType {
         return LinkType::News;
     }
     LinkType::Other
+}
+
+/// Cert si el host de `url` (ja en minúscules) és `domain` o un subdomini seu.
+/// Evita falsos positius de substring (p.ex. "ex.com" vs "x.com").
+fn host_is(url: &str, domain: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host == domain || host.ends_with(&format!(".{domain}"))
 }
 
 // ---- Fallback heuristic (sense LLM) ----
@@ -173,15 +201,18 @@ fn heuristic_sentiment(text: &str) -> Sentiment {
     }
 }
 
-fn heuristic_analysis(title: &str, text: &str, max_words: usize) -> Analysis {
+fn heuristic_analysis(title: &str, text: &str, max_chars: usize) -> Analysis {
     let mut summary = first_sentences(text, 3);
     if summary.is_empty() {
         summary = title.to_string();
     }
-    // limita per paraules
-    let words: Vec<&str> = summary.split_whitespace().collect();
-    if words.len() > max_words {
-        summary = words[..max_words].join(" ");
+    // limita per caràcters, respectant el límit de paraula
+    if summary.chars().count() > max_chars {
+        let truncated: String = summary.chars().take(max_chars).collect();
+        summary = match truncated.rfind(' ') {
+            Some(i) if i >= max_chars / 2 => truncated[..i].to_string(),
+            _ => truncated.trim_end().to_string(),
+        };
     }
     Analysis {
         title: None,
@@ -262,14 +293,14 @@ async fn run_inner(
     let text_trunc: String = parsed.text.chars().take(4000).collect();
 
     let analysis = match llm {
-        Some(client) => match client.analyze(&title, &text_trunc, cfg.summary_max_words).await {
+        Some(client) => match client.analyze(&title, &text_trunc, cfg.summary_max_chars).await {
             Ok(a) => a,
             Err(e) => {
                 tracing::warn!(error = %e, "llm failed, using heuristic fallback");
-                heuristic_analysis(&title, &parsed.text, cfg.summary_max_words)
+                heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars)
             }
         },
-        None => heuristic_analysis(&title, &parsed.text, cfg.summary_max_words),
+        None => heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars),
     };
 
     // Títol: prioritza el curt del LLM; si no, retalla el de la pàgina a ~80 car.
@@ -337,6 +368,8 @@ mod tests {
         assert_eq!(classify("https://github.com/x/y", None), LinkType::Repo);
         assert_eq!(classify("https://youtu.be/abc", None), LinkType::Video);
         assert_eq!(classify("https://ex.com", Some("article")), LinkType::Article);
+        assert_eq!(classify("https://www.instagram.com/p/abc", None), LinkType::Social);
+        assert_eq!(classify("https://x.com/u/status/1", None), LinkType::Social);
         assert_eq!(classify("https://ex.com", None), LinkType::Other);
     }
 
