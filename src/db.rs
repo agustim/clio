@@ -280,6 +280,19 @@ impl Db {
         Ok(true)
     }
 
+    /// Esborra un link i els seus reports. Retorna true si existia.
+    pub async fn delete_link(&self, link_id: Uuid) -> Result<bool> {
+        sqlx::query("DELETE FROM reports WHERE link_id = ?")
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        let res = sqlx::query("DELETE FROM links WHERE id = ?")
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn set_link_status(&self, link_id: Uuid, status: LinkStatus) -> Result<()> {
         sqlx::query("UPDATE links SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status.as_str())

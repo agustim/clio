@@ -1,5 +1,5 @@
 use crate::error::{AppError, Result};
-use crate::models::{LinkType, Sentiment, User};
+use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment, User, UserRole};
 use crate::service::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -20,7 +20,8 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/api/v1/links", post(create_link).get(list_links))
-        .route("/api/v1/links/:id", get(get_link))
+        .route("/api/v1/links/:id", get(get_link).delete(delete_link))
+        .route("/api/v1/links/:id/reprocess", post(reprocess_link))
         .route("/api/v1/stats", get(stats))
         // Tot el que no és /api cau a la web estàtica.
         .fallback_service(static_files)
@@ -125,6 +126,47 @@ async fn get_link(
     let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
     let link = state.db.link_by_id(uuid).await?.ok_or(AppError::NotFound)?;
     Ok(Json(json!(link)))
+}
+
+/// Reforça un link: el reencua perquè es torni a analitzar de zero (útil quan
+/// l'LLM o el fetch han fallat). Qualsevol usuari autenticat pot fer-ho.
+async fn reprocess_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let _user = auth(&state, &headers, None).await?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    state.db.link_by_id(uuid).await?.ok_or(AppError::NotFound)?;
+
+    // Reinicia estat perquè el pipeline (shallow -> deep) torni a córrer.
+    state.db.set_link_status(uuid, LinkStatus::Pending).await?;
+    state.db.set_deep_status(uuid, DeepStatus::None).await?;
+    state.enqueue(uuid);
+
+    Ok(Json(json!({ "link_id": uuid, "status": "queued" })))
+}
+
+/// Dona de baixa un link. Permès a admins o a qualsevol dels seus reporters.
+async fn delete_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let user = auth(&state, &headers, None).await?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    let link = state.db.link_by_id(uuid).await?.ok_or(AppError::NotFound)?;
+
+    let allowed = user.role == UserRole::Admin || link.co_reporters.contains(&user.id);
+    if !allowed {
+        return Err(AppError::Forbidden);
+    }
+
+    let deleted = state.db.delete_link(uuid).await?;
+    if deleted {
+        state.web_dirty.notify_one();
+    }
+    Ok(Json(json!({ "link_id": uuid, "deleted": deleted })))
 }
 
 async fn stats(State(state): State<AppState>) -> Result<Json<Value>> {

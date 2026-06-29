@@ -108,9 +108,12 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <p class="tagline">Enllaços analitzats &amp; resumits</p>
         </div>
       </div>
-      <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
-        <span class="theme-icon"></span>
-      </button>
+      <div class="topbar-actions">
+        <button id="token-btn" class="theme-toggle" aria-label="Sessió" title="Introdueix el teu API token">🔑</button>
+        <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
+          <span class="theme-icon"></span>
+        </button>
+      </div>
     </div>
     <div class="topbar-inner controls">
       <div class="search-wrap">
@@ -313,6 +316,29 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .new-toggle.on { color: var(--accent); }
 .new-toggle.on b { color: var(--accent); }
 
+/* Sessió + accions per link */
+.topbar-actions { display: flex; gap: .5rem; }
+#token-btn.on { border-color: var(--accent); color: var(--accent); }
+.actions { display: flex; gap: .4rem; margin-top: .2rem; }
+.act {
+  cursor: pointer; font-size: .76rem; padding: .28rem .6rem; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-soft); color: var(--muted);
+  transition: all var(--transition);
+}
+.act:hover { color: var(--fg); border-color: var(--accent); }
+.act-delete:hover { color: var(--neg); border-color: var(--neg); }
+
+/* Toast */
+.toast {
+  position: fixed; left: 50%; bottom: 1.2rem; transform: translate(-50%, 2rem);
+  background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 10px; padding: .6rem 1rem; font-size: .88rem; box-shadow: var(--shadow);
+  opacity: 0; pointer-events: none; transition: all var(--transition); z-index: 50; max-width: 90vw;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.ok { border-color: var(--pos); }
+.toast.err { border-color: var(--neg); }
+
 /* ---- Cor / personalització ---- */
 .card-top-right { display: flex; align-items: center; gap: .45rem; flex: none; }
 .heart {
@@ -366,6 +392,68 @@ function writeLastVisit(ms) {
 const LAST_VISIT = readLastVisit();
 function linkTime(l) { const t = Date.parse(l.created_at); return isNaN(t) ? 0 : t; }
 function isNew(l) { return LAST_VISIT > 0 && linkTime(l) > LAST_VISIT; }
+
+// ---- Sessió: API token (per reforçar / donar de baixa links) ----
+// Les accions només són possibles servint per HTTP (l'API i la web comparteixen
+// origen). Sota file:// no hi ha API: s'amaguen els botons.
+const CAN_API = location.protocol !== 'file:';
+function getToken() { return localStorage.getItem('clio-token') || ''; }
+function setToken(t) { if (t) localStorage.setItem('clio-token', t); else localStorage.removeItem('clio-token'); }
+function hasToken() { return CAN_API && !!getToken(); }
+
+async function api(method, path) {
+  const r = await fetch('/api/v1' + path, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + getToken() },
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.error || ('HTTP ' + r.status));
+  }
+  return r.json().catch(() => ({}));
+}
+
+// Toast efímer a baix de la pantalla.
+let toastTimer = null;
+function toast(msg, kind) {
+  let el = $('toast');
+  if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
+  el.textContent = msg;
+  el.className = 'toast show' + (kind ? ' ' + kind : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast'; }, 3200);
+}
+
+async function reprocessLink(id) {
+  try { await api('POST', '/links/' + id + '/reprocess'); toast('Link reencuat: es tornarà a analitzar.', 'ok'); }
+  catch (e) { toast('Error en reforçar: ' + e.message, 'err'); }
+}
+async function deleteLink(id) {
+  if (!confirm('Segur que vols donar de baixa aquest link?')) return;
+  try {
+    await api('DELETE', '/links/' + id);
+    ALL = ALL.filter(l => l.id !== id);
+    hearts.delete(id);
+    renderStats(); buildFilters(); render();
+    toast('Link donat de baixa.', 'ok');
+  } catch (e) { toast('Error en donar de baixa: ' + e.message, 'err'); }
+}
+
+function initTokenButton() {
+  const btn = $('token-btn');
+  if (!btn) return;
+  if (!CAN_API) { btn.style.display = 'none'; return; }
+  const refresh = () => { btn.classList.toggle('on', !!getToken()); btn.title = getToken() ? 'Sessió activa · clica per canviar/treure el token' : 'Introdueix el teu API token'; };
+  refresh();
+  btn.onclick = () => {
+    const cur = getToken();
+    const t = prompt(cur ? 'API token (buit per tancar sessió):' : 'Enganxa el teu API token:', cur);
+    if (t === null) return;
+    setToken(t.trim());
+    refresh(); render();
+    toast(getToken() ? 'Sessió iniciada.' : 'Sessió tancada.', 'ok');
+  };
+}
 
 // ---- Personalització per "cors" (sense usuaris; estat desat a cookie) ----
 // La cookie guarda NOMÉS els ids marcats; el vector de l'usuari (centroide)
@@ -587,7 +675,11 @@ function render() {
       <div class="meta">
         <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
         <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
-      </div>`;
+      </div>
+      ${hasToken() ? `<div class="actions">
+        <button class="act act-refresh" data-id="${esc(l.id)}" title="Reforça: torna a analitzar">↻ Refer</button>
+        <button class="act act-delete" data-id="${esc(l.id)}" title="Dona de baixa aquest link">🗑 Baixa</button>
+      </div>` : ''}`;
     card.querySelectorAll('.tags .chip').forEach(ch => {
       ch.onclick = () => setHash('tag:' + ch.dataset.tag);
     });
@@ -596,6 +688,10 @@ function render() {
     });
     const hb = card.querySelector('.heart');
     if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
+    const rf = card.querySelector('.act-refresh');
+    if (rf) rf.onclick = () => reprocessLink(l.id);
+    const dl = card.querySelector('.act-delete');
+    if (dl) dl.onclick = () => deleteLink(l.id);
     grid.appendChild(card);
   });
 
@@ -640,6 +736,7 @@ async function maybeFetch() {
 
 (async function init() {
   initTheme();
+  initTokenButton();
   await maybeFetch();
   applyHash();
   renderStats();

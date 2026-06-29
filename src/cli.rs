@@ -45,6 +45,10 @@ pub enum Cmd {
         #[arg(long)]
         shallow: bool,
     },
+    /// Dona de baixa un link pel seu id
+    Delete {
+        id: String,
+    },
     /// Commit + push de la web (opt-in, requereix WEB_REPO_URL)
     Push,
 }
@@ -159,6 +163,13 @@ pub async fn run(
                 }
             }
             println!("Fet: {ok} ok, {err} errors. Regenera la web amb `generate`.");
+            Ok(())
+        }
+        Cmd::Delete { id } => {
+            let uuid = uuid::Uuid::parse_str(&id)
+                .map_err(|_| AppError::BadRequest("id invàlid".into()))?;
+            let deleted = state.db.delete_link(uuid).await?;
+            println!("{}", if deleted { "Link esborrat." } else { "No existeix cap link amb aquest id." });
             Ok(())
         }
         Cmd::Push => {
