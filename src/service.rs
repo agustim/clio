@@ -21,6 +21,8 @@ pub struct AppState {
     pub llm: Option<Arc<LlmClient>>,
     pub embedder: Option<Arc<Embedder>>,
     pub queue: Queue,
+    /// Avisos d'admin via Telegram (None si no configurat).
+    pub notifier: Option<Arc<crate::telegram::Notifier>>,
     /// Senyal: el contingut web ha canviat i cal regenerar/desplegar.
     pub web_dirty: Arc<tokio::sync::Notify>,
 }
@@ -43,6 +45,8 @@ impl AppState {
             .build()?;
         let llm = pipeline::build_llm(&cfg, http.clone());
         let embedder = crate::embed::build(&cfg.embed, http.clone())?.map(Arc::new);
+        let notifier =
+            crate::telegram::Notifier::build(&cfg.telegram_bot_token, cfg.admin_chat_id).map(Arc::new);
         let (queue, rx) = queue::start();
         let state = Self {
             db,
@@ -51,6 +55,7 @@ impl AppState {
             llm,
             embedder,
             queue,
+            notifier,
             web_dirty: Arc::new(tokio::sync::Notify::new()),
         };
         Ok((state, rx))
@@ -91,6 +96,13 @@ impl AppState {
     /// Encua la primera passada (shallow) a la cua de workers.
     pub fn enqueue(&self, link_id: Uuid) {
         self.queue.shallow(link_id);
+    }
+
+    /// Envia un avís d'admin si hi ha notifier configurat (best-effort).
+    pub async fn notify(&self, text: &str) {
+        if let Some(n) = &self.notifier {
+            n.send(text).await;
+        }
     }
 
     /// Re-encua tota la feina pendent de la DB (recovery en arrencar).

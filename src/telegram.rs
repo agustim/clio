@@ -8,6 +8,32 @@ use crate::service::AppState;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+/// Emissor d'avisos d'admin a un chat fix de Telegram. Es comparteix dins
+/// d'AppState perquè qualsevol part (cua, pipeline) pugui notificar.
+pub struct Notifier {
+    http: reqwest::Client,
+    base: String,
+    chat_id: i64,
+}
+
+impl Notifier {
+    /// Construeix el notifier si hi ha token i chat_id configurats.
+    pub fn build(token: &Option<String>, chat_id: Option<i64>) -> Option<Self> {
+        let token = token.as_deref().filter(|t| !t.is_empty())?;
+        let chat_id = chat_id?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .ok()?;
+        Some(Self { http, base: format!("https://api.telegram.org/bot{token}"), chat_id })
+    }
+
+    /// Envia un avís (best-effort: els errors només es registren).
+    pub async fn send(&self, text: &str) {
+        send_message(&self.http, &self.base, self.chat_id, text).await;
+    }
+}
+
 pub async fn run(state: AppState) {
     let token = match &state.cfg.telegram_bot_token {
         Some(t) if !t.is_empty() => t.clone(),
@@ -34,6 +60,7 @@ pub async fn run(state: AppState) {
     // Descarta el backlog: agafa l'últim update sense processar-lo, per no
     // respondre missatges acumulats mentre el bot estava aturat.
     let mut offset: i64 = drain_backlog(&http, &base).await.unwrap_or_default();
+    state.notify("✅ Clio actiu.").await;
     loop {
         let resp = http
             .get(format!("{base}/getUpdates"))

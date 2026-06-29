@@ -66,6 +66,18 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
     }
 }
 
+/// Avisa l'admin d'una feina fallida (inclou la URL si es pot resoldre).
+async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) {
+    if state.notifier.is_none() {
+        return;
+    }
+    let url = match state.db.link_by_id(link_id).await {
+        Ok(Some(l)) => l.url,
+        _ => link_id.to_string(),
+    };
+    state.notify(&format!("⚠️ {what} fallida\n{url}\n{err}")).await;
+}
+
 async fn handle(state: &AppState, job: Job) {
     let llm = state.llm.as_deref();
     let embedder = state.embedder.as_deref();
@@ -86,13 +98,19 @@ async fn handle(state: &AppState, job: Job) {
                     // Contingut nou publicable: dispara deploy reactiu (debounced).
                     state.web_dirty.notify_one();
                 }
-                Err(e) => tracing::error!(link_id = %job.link_id, error = %e, "shallow job failed"),
+                Err(e) => {
+                    tracing::error!(link_id = %job.link_id, error = %e, "shallow job failed");
+                    notify_failure(state, job.link_id, "Anàlisi", &e.to_string()).await;
+                }
             }
         }
         Stage::Deep => {
             match deep::process_deep(&state.db, &state.cfg, &state.http, llm, job.link_id).await {
                 Ok(()) => state.web_dirty.notify_one(),
-                Err(e) => tracing::error!(link_id = %job.link_id, error = %e, "deep job failed"),
+                Err(e) => {
+                    tracing::error!(link_id = %job.link_id, error = %e, "deep job failed");
+                    notify_failure(state, job.link_id, "Anàlisi profunda", &e.to_string()).await;
+                }
             }
         }
     }
