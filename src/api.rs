@@ -77,11 +77,27 @@ async fn users_list(State(state): State<AppState>, headers: HeaderMap) -> Result
     Ok(Json(json!({ "count": users.len(), "users": users })))
 }
 
+/// Comprova que cap ALTRE usuari ja tingui aquest telegram_id.
+async fn telegram_id_free(state: &AppState, tid: &str, except: Option<Uuid>) -> Result<()> {
+    if tid.is_empty() {
+        return Ok(());
+    }
+    if let Some(other) = state.db.user_by_telegram_id(tid).await? {
+        if Some(other.id) != except {
+            return Err(AppError::BadRequest(
+                "aquest telegram_id ja està assignat a un altre usuari".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct CreateUserReq {
     username: String,
     #[serde(default)]
     admin: bool,
+    telegram_id: Option<String>,
 }
 
 async fn users_create(
@@ -97,11 +113,22 @@ async fn users_create(
     if state.db.user_by_username(username).await?.is_some() {
         return Err(AppError::BadRequest("ja existeix un usuari amb aquest nom".into()));
     }
+    let tid = body.telegram_id.as_deref().map(str::trim).unwrap_or("");
+    telegram_id_free(&state, tid, None).await?;
+
     let role = if body.admin { UserRole::Admin } else { UserRole::User };
-    let u = state.db.create_user(username, role).await?;
+    let mut u = state.db.create_user(username, role).await?;
+    if !tid.is_empty() {
+        u = state
+            .db
+            .update_user(u.id, None, None, Some(tid))
+            .await?
+            .ok_or(AppError::NotFound)?;
+    }
     // El token només es mostra aquí (a la creació) i en regenerar-lo.
     Ok(Json(json!({
-        "id": u.id, "username": u.username, "role": u.role, "api_token": u.api_token,
+        "id": u.id, "username": u.username, "role": u.role,
+        "telegram_id": u.telegram_id, "api_token": u.api_token,
     })))
 }
 
@@ -109,6 +136,7 @@ async fn users_create(
 struct UpdateUserReq {
     username: Option<String>,
     admin: Option<bool>,
+    telegram_id: Option<String>,
 }
 
 async fn users_update(
@@ -125,12 +153,19 @@ async fn users_update(
     }
     let role = body.admin.map(|a| if a { UserRole::Admin } else { UserRole::User });
     let username = body.username.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // telegram_id: Some("") esborra; Some(x) assigna; None no toca.
+    let telegram_id = body.telegram_id.as_deref().map(str::trim);
+    if let Some(tid) = telegram_id {
+        telegram_id_free(&state, tid, Some(uuid)).await?;
+    }
     let u = state
         .db
-        .update_user(uuid, username, role)
+        .update_user(uuid, username, role, telegram_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Json(json!({ "id": u.id, "username": u.username, "role": u.role })))
+    Ok(Json(json!({
+        "id": u.id, "username": u.username, "role": u.role, "telegram_id": u.telegram_id,
+    })))
 }
 
 async fn users_delete(

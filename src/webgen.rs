@@ -367,8 +367,8 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .rolebadge.admin { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
 .rolebadge.user { color: var(--muted); }
 .ucreate { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--border); flex-wrap: wrap; }
-.ucreate input[type=text], .ucreate #nu-name {
-  flex: 1 1 200px; padding: .45rem .7rem; border-radius: 8px;
+.ucreate #nu-name, .ucreate #nu-tg {
+  flex: 1 1 160px; padding: .45rem .7rem; border-radius: 8px;
   border: 1px solid var(--border); background: var(--bg-soft); color: var(--fg); font-size: .88rem;
 }
 .nu-adm { display: inline-flex; align-items: center; gap: .3rem; color: var(--muted); font-size: .85rem; }
@@ -527,11 +527,12 @@ async function openUsersModal() {
     <div class="modal-head"><h3>👤 Usuaris</h3><button class="modal-x" title="Tanca">✕</button></div>
     <div class="modal-body">
       <table class="utable">
-        <thead><tr><th>Usuari</th><th>Rol</th><th>Creat</th><th></th></tr></thead>
+        <thead><tr><th>Usuari</th><th>Rol</th><th>Telegram</th><th>Creat</th><th></th></tr></thead>
         <tbody id="ulist"></tbody>
       </table>
       <div class="ucreate">
         <input id="nu-name" placeholder="nom del nou usuari" autocomplete="off">
+        <input id="nu-tg" placeholder="telegram id (opcional)" autocomplete="off">
         <label class="nu-adm"><input type="checkbox" id="nu-admin"> admin</label>
         <button id="nu-add" class="act">+ Crea</button>
       </div>
@@ -553,12 +554,15 @@ async function openUsersModal() {
     list.forEach(u => {
       const tr = document.createElement('tr');
       const mine = ME && u.id === ME.id;
+      const tg = u.telegram_id ? esc(u.telegram_id) : '<span class="you">—</span>';
       tr.innerHTML = `<td>${esc(u.username)}${mine ? ' <span class="you">(tu)</span>' : ''}</td>
         <td><span class="rolebadge ${u.role}">${u.role}</span></td>
+        <td class="tgcell">${tg}</td>
         <td>${(u.created_at || '').slice(0,10)}</td>
         <td class="urow-actions">
           <button class="act" data-act="role" title="Canvia el rol">${u.role==='admin'?'→ user':'→ admin'}</button>
           <button class="act" data-act="rename" title="Reanomena">✎</button>
+          <button class="act" data-act="tg" title="Edita telegram id">✈</button>
           <button class="act" data-act="token" title="Regenera token">🔑</button>
           <button class="act act-delete" data-act="del" title="Esborra"${mine?' disabled':''}>🗑</button>
         </td>`;
@@ -570,6 +574,12 @@ async function openUsersModal() {
         const n = prompt('Nou nom per ' + u.username + ':', u.username);
         if (!n || !n.trim()) return;
         try { await api('PATCH', '/users/' + u.id, { username: n.trim() }); toast('Nom actualitzat.', 'ok'); refresh(); }
+        catch (e) { toast(e.message, 'err'); }
+      };
+      tr.querySelector('[data-act=tg]').onclick = async () => {
+        const v = prompt('Telegram id de ' + u.username + ' (buit per treure):', u.telegram_id || '');
+        if (v === null) return;
+        try { await api('PATCH', '/users/' + u.id, { telegram_id: v.trim() }); toast('Telegram id actualitzat.', 'ok'); refresh(); }
         catch (e) { toast(e.message, 'err'); }
       };
       tr.querySelector('[data-act=token]').onclick = async () => {
@@ -592,9 +602,11 @@ async function openUsersModal() {
     const name = ov.querySelector('#nu-name').value.trim();
     if (!name) { toast('Cal un nom.', 'err'); return; }
     const adm = ov.querySelector('#nu-admin').checked;
+    const tg = ov.querySelector('#nu-tg').value.trim();
     try {
-      const d = await api('POST', '/users', { username: name, admin: adm });
+      const d = await api('POST', '/users', { username: name, admin: adm, telegram_id: tg });
       ov.querySelector('#nu-name').value = '';
+      ov.querySelector('#nu-tg').value = '';
       ov.querySelector('#nu-admin').checked = false;
       refresh();
       showToken(d.username, d.api_token);

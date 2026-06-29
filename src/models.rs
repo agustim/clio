@@ -54,6 +54,10 @@ pub struct User {
     #[serde(skip_serializing)]
     pub api_token: String,
     pub role: UserRole,
+    /// Id numèric de Telegram (com a text). El bot només accepta links
+    /// d'usuaris amb aquest camp informat.
+    #[serde(default)]
+    pub telegram_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

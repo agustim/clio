@@ -61,6 +61,7 @@ impl Db {
             ("001_init", include_str!("../migrations/001_init.sql")),
             ("002_deep", include_str!("../migrations/002_deep.sql")),
             ("003_embeddings", include_str!("../migrations/003_embeddings.sql")),
+            ("004_telegram", include_str!("../migrations/004_telegram.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -110,9 +111,12 @@ impl Db {
             username: username.to_string(),
             api_token: token,
             role,
+            telegram_id: None,
             created_at: parse_ts(&created),
         })
     }
+
+    const USER_COLS: &'static str = "id, username, api_token, role, telegram_id, created_at";
 
     fn row_to_user(r: &sqlx::sqlite::SqliteRow) -> User {
         User {
@@ -120,39 +124,45 @@ impl Db {
             username: r.get("username"),
             api_token: r.get("api_token"),
             role: UserRole::from_db(r.get::<String, _>("role").as_str()),
+            telegram_id: r.get("telegram_id"),
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
         }
     }
 
     pub async fn user_by_username(&self, username: &str) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(&self.pool)
-            .await?;
+        let q = format!("SELECT {} FROM users WHERE username = ?", Self::USER_COLS);
+        let row = sqlx::query(&q).bind(username).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| Self::row_to_user(&r)))
     }
 
     pub async fn user_by_id(&self, id: Uuid) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+        let q = format!("SELECT {} FROM users WHERE id = ?", Self::USER_COLS);
+        let row = sqlx::query(&q).bind(id.to_string()).fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| Self::row_to_user(&r)))
+    }
+
+    /// Cerca per id de Telegram (el bot l'usa per autoritzar qui envia links).
+    pub async fn user_by_telegram_id(&self, telegram_id: &str) -> Result<Option<User>> {
+        let q = format!("SELECT {} FROM users WHERE telegram_id = ?", Self::USER_COLS);
+        let row = sqlx::query(&q).bind(telegram_id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| Self::row_to_user(&r)))
     }
 
     pub async fn list_users(&self) -> Result<Vec<User>> {
-        let rows = sqlx::query("SELECT id, username, api_token, role, created_at FROM users ORDER BY created_at")
-            .fetch_all(&self.pool)
-            .await?;
+        let q = format!("SELECT {} FROM users ORDER BY created_at", Self::USER_COLS);
+        let rows = sqlx::query(&q).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(Self::row_to_user).collect())
     }
 
     /// Modifica nom i/o rol. Retorna l'usuari resultant (None si no existeix).
+    /// Modifica nom, rol i/o telegram_id. Per a `telegram_id`: `None` = no el
+    /// toquis; `Some("")` = esborra'l (NULL); `Some(x)` = posa'l.
     pub async fn update_user(
         &self,
         id: Uuid,
         username: Option<&str>,
         role: Option<UserRole>,
+        telegram_id: Option<&str>,
     ) -> Result<Option<User>> {
         let Some(mut u) = self.user_by_id(id).await? else {
             return Ok(None);
@@ -163,9 +173,13 @@ impl Db {
         if let Some(r) = role {
             u.role = r;
         }
-        sqlx::query("UPDATE users SET username = ?, role = ? WHERE id = ?")
+        if let Some(tid) = telegram_id {
+            u.telegram_id = if tid.is_empty() { None } else { Some(tid.to_string()) };
+        }
+        sqlx::query("UPDATE users SET username = ?, role = ?, telegram_id = ? WHERE id = ?")
             .bind(&u.username)
             .bind(u.role.as_str())
+            .bind(u.telegram_id.as_deref())
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -200,10 +214,8 @@ impl Db {
     }
 
     pub async fn user_by_token(&self, token: &str) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT id, username, api_token, role, created_at FROM users WHERE api_token = ?")
-            .bind(token)
-            .fetch_optional(&self.pool)
-            .await?;
+        let q = format!("SELECT {} FROM users WHERE api_token = ?", Self::USER_COLS);
+        let row = sqlx::query(&q).bind(token).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| Self::row_to_user(&r)))
     }
 
