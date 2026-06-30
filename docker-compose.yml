@@ -1,0 +1,32 @@
+# Clio + Cloudflare Tunnel.
+#
+# 1) Crea un tunnel a https://one.dash.cloudflare.com (Zero Trust > Networks >
+#    Tunnels), copia'n el token a .env com TUNNEL_TOKEN=...
+# 2) Al tunnel, afegeix un Public Hostname (el teu domini) que apunti a
+#    Service = http://clio:8080  (nom del servei dins d'aquesta xarxa).
+# 3) docker compose up -d
+#
+# clio NO publica ports a l'amfitrió: només l'accedeix cloudflared per la xarxa
+# interna. Per accés local afegeix `ports: ["8080:8080"]` al servei clio.
+services:
+  clio:
+    build: .
+    image: ghcr.io/agustim/clio:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: sqlite://data/linkanalyzer.db
+      PUBLIC_DIR: public
+    volumes:
+      - ./data:/app/data                     # persisteix SQLite
+      - ./.fastembed_cache:/app/.fastembed_cache  # no re-descarrega el model
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?cal TUNNEL_TOKEN a .env}
+    depends_on:
+      - clio
