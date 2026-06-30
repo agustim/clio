@@ -20,6 +20,7 @@ services:
       PUBLIC_DIR: public
     volumes:
       - ./data:/app/data                     # persisteix SQLite
+      - ./public:/app/public                 # reusa el repo git de la web estàtica
       - ./.fastembed_cache:/app/.fastembed_cache  # no re-descarrega el model
 
   cloudflared:

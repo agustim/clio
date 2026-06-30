@@ -44,6 +44,11 @@ pub fn git_push(cfg: &Config, message: &str) -> Result<()> {
         run_git(dir, &["checkout", "-B", branch])?;
     }
 
+    // Identitat git: sense això el commit falla en un container fresc i el push
+    // peta amb "src refspec main does not match any" (no hi ha cap commit).
+    run_git(dir, &["config", "user.email", "clio@localhost"])?;
+    run_git(dir, &["config", "user.name", "Clio"])?;
+
     // Configura remote amb token si s'ha donat.
     let remote_url = match (&cfg.git.web_repo_url, &cfg.git.git_token) {
         (Some(url), Some(token)) => inject_token(url, token),
