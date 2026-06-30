@@ -63,7 +63,10 @@ pub fn git_push(cfg: &Config, message: &str) -> Result<()> {
     run_git(dir, &["add", "."])?;
     // commit pot fallar si no hi ha canvis: ho tolerem.
     let _ = run_git(dir, &["commit", "-m", message]);
-    run_git(dir, &["push", "-u", "origin", branch])?;
+    // La web és contingut derivat de la BD (regenerat sencer cada cop) i Clio
+    // és l'únic que escriu en aquest remot, que és només destí de publicació.
+    // Sobreescrivim amb --force per no fallar amb "fetch first" si divergeix.
+    run_git(dir, &["push", "-u", "--force", "origin", branch])?;
     tracing::info!("static web pushed to git");
     Ok(())
 }
