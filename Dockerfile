@@ -1,5 +1,7 @@
 # ---- build ----
-FROM rust:1-bookworm AS build
+# trixie (glibc 2.38): el binari precompilat d'onnxruntime (via fastembed/ort)
+# referencia símbols __isoc23_* que bookworm (glibc 2.36) no té.
+FROM rust:1-trixie AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -7,7 +9,7 @@ COPY migrations ./migrations
 RUN cargo build --release --bin linkanalyzer
 
 # ---- runtime ----
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
