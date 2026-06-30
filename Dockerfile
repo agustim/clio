@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+# public/ no es copia: serve el regenera a l'arrencada (HTML/CSS/JS incrustats al binari).
 COPY --from=build /app/target/release/linkanalyzer /usr/local/bin/linkanalyzer
-COPY public ./public
-RUN mkdir -p data
+RUN mkdir -p data public
 ENV BIND_ADDR=0.0.0.0:8080 \
     DATABASE_URL=sqlite://data/linkanalyzer.db \
     PUBLIC_DIR=public
