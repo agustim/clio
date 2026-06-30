@@ -1,8 +1,8 @@
 # Clio · LinkAnalyzer
 
-Recull enllaços (API REST / CLI / Telegram-stub), els analitza (fetch → parse → classify → summarize → tags → sentiment), els desa a SQLite amb **co-reporting**, i genera una web estàtica publicable per Git.
+Recull enllaços (API REST / CLI / bot de Telegram), els analitza (fetch → parse → classify → summarize → tags → sentiment), genera **embeddings** per a ranking personalitzat, els desa a SQLite amb **co-reporting**, i genera una web estàtica publicable per Git (deploy reactiu opt-in).
 
-Implementació de [definition.md](definition.md). Abast actual: **nucli sòlid** — API + CLI + pipeline + webgen complets; Telegram és un stub funcional; git push és opt-in.
+Implementació de [definition.md](definition.md). Abast actual: API + CLI + pipeline (shallow+deep) + embeddings + bot de Telegram + webgen complets; git push i deploy reactiu són opt-in.
 
 ## Arquitectura
 
@@ -16,6 +16,9 @@ Implementació de [definition.md](definition.md). Abast actual: **nucli sòlid**
 | Cua de workers | [src/queue.rs](src/queue.rs) |
 | 2a passada (deep) | [src/deep.rs](src/deep.rs) |
 | Client LLM (OpenAI-compat) | [src/llm.rs](src/llm.rs) |
+| Embeddings (local/HTTP) | [src/embed.rs](src/embed.rs) |
+| Extractors xarxes socials | [src/social.rs](src/social.rs) |
+| Bot de Telegram | [src/telegram.rs](src/telegram.rs) |
 | Orquestració (AppState) | [src/service.rs](src/service.rs) |
 | API REST (axum) | [src/api.rs](src/api.rs) |
 | Web estàtica + git push | [src/webgen.rs](src/webgen.rs) |
@@ -32,8 +35,11 @@ $DB user-add alice --admin    # crea usuari -> imprimeix api_token
 $DB add https://www.rust-lang.org
 $DB list
 $DB generate                  # escriu ./public (index.html, data/links.json, css, js)
-$DB serve                     # API a http://127.0.0.1:8080
+$DB reindex                   # backfill d'embeddings dels links existents
+$DB serve                     # API + bot a http://127.0.0.1:8080
 ```
+
+Subcomandes: `serve`, `user-add`, `add`, `list`, `generate`, `reindex`, `reprocess`, `delete`, `push`.
 
 ## LLM (vLLM / OpenAI / Ollama)
 
@@ -47,6 +53,23 @@ LLM_API_KEY=        # opcional (vLLM local sovint no en cal)
 ```
 
 Si l'endpoint no respon o `LLM_PROVIDER=none`, s'usa **fallback extractiu** (3 primeres frases + tags per freqüència + sentiment per lèxic). El resum es demana en català.
+
+## Embeddings (ranking personalitzat)
+
+Independents del LLM de chat. Habiliten ranking per "cors" a la web. Backfill: `linkanalyzer reindex`.
+
+```env
+EMBED_PROVIDER=local                 # local | openai | ollama/vllm/http | (buit=reusa LLM_PROVIDER)
+EMBED_MODEL=multilingual-e5-small    # en local: id de fastembed (bge-m3, nomic-embed-text…)
+EMBED_DIM=256
+EMBED_BASE_URL=                       # buit => reusa LLM_BASE_URL
+EMBED_API_KEY=
+```
+
+- `local`: in-process via **fastembed** (feature `local-embed`, activa per defecte). Descarrega el model el primer cop, després offline. Cau a `.fastembed_cache`.
+- `openai` / `ollama` / `vllm` / `http`: endpoint OpenAI-compatible (`/embeddings`).
+
+Build lleuger sense embeddings locals: `cargo build --no-default-features` (només via HTTP).
 
 ## Cua d'anàlisi + segona passada (deep)
 
@@ -76,17 +99,52 @@ Auth: `Authorization: Bearer <api_token>`.
 | GET | `/links/{id}` | detall |
 | GET | `/stats` | comptadors globals |
 
-## Git push (opt-in)
+## Bot de Telegram
+
+Si `TELEGRAM_BOT_TOKEN` està definit, `serve` arrenca el bot. Accepta links d'usuaris amb `telegram_id` a la fitxa i respon "Processant url." en encuar-los. `ADMIN_CHAT_ID` rep avisos d'admin (arrencada + errors d'anàlisi); buit = cap avís. L'id numèric el dóna `@userinfobot` (grups: id negatiu).
+
+```env
+TELEGRAM_BOT_TOKEN=
+ADMIN_CHAT_ID=
+```
+
+## Git push + deploy reactiu (opt-in)
 
 `generate` sempre escriu `./public`. `push` fa commit+push **només** si `WEB_REPO_URL` està definit (init, remote amb `GIT_TOKEN`, `git push origin <WEB_BRANCH>`). Sense config → s'omet amb log. Usa el `git` del sistema (no `git2`) per evitar dependències natives pesades.
+
+Durant `serve`, dues estratègies de regeneració de la web:
+
+```env
+WEB_REGEN_SECS=0      # regeneració periòdica (segons). 0 = desactiva.
+WEB_DEBOUNCE_SECS=60  # deploy reactiu: agrupa una ràfega de links nous en un sol push
+```
+
+Recomanat: `WEB_REGEN_SECS=0` + deploy reactiu — la web es regenera i fa push només quan la cua acaba d'analitzar links nous (debounce per agrupar ràfegues).
+
+## Docker
+
+Imatge mínima multi-stage ([Dockerfile](Dockerfile)):
+
+```bash
+docker build -t clio .
+docker run -p 8080:8080 \
+  -v $PWD/data:/app/data \
+  -v $PWD/.fastembed_cache:/app/.fastembed_cache \
+  --env-file .env clio
+```
+
+`BIND_ADDR` per defecte dins la imatge és `0.0.0.0:8080` (cal per accedir des de fora del container). Munta `data/` per persistir SQLite i `.fastembed_cache/` per no re-descarregar el model d'embeddings.
+
+## Releases (CI)
+
+`scripts/release.sh [patch|minor|major]` puja un tag `vX.Y.Z` que dispara [.github/workflows/release.yml](.github/workflows/release.yml):
+
+1. Build de l'executable + GitHub Release (marcada `latest`).
+2. Container a `ghcr.io/agustim/clio:vX.Y.Z` i `:latest`.
+3. Neteja: manté les 5 últimes releases i packages.
 
 ## Tests
 
 ```bash
 cargo test    # normalització/dedup + classify + parse + fallback
 ```
-
-## Pendent (fora d'abast actual)
-
-- Bot Telegram real (stub a [src/telegram.rs](src/telegram.rs), dissenyat per reusar `AppState::report_link` amb `teloxide`).
-- Trigger automàtic de webgen+push després de cada processament (ara manual via CLI).
