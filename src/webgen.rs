@@ -117,6 +117,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         </div>
       </div>
       <div class="topbar-actions">
+        <button id="add-btn" class="theme-toggle" aria-label="Afegeix enllaç" title="Afegeix un nou enllaç" style="display:none">➕</button>
         <button id="admin-btn" class="theme-toggle" aria-label="Usuaris" title="Gestió d'usuaris" style="display:none">👤</button>
         <button id="token-btn" class="theme-toggle" aria-label="Sessió" title="Introdueix el teu API token">🔑</button>
         <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
@@ -527,9 +528,39 @@ function initTokenButton() {
     if (t === null) return;
     setToken(t.trim());
     await loadMe();
-    refresh(); refreshAdminBtn(); render();
+    refresh(); refreshAdminBtn(); refreshAddBtn(); render();
     toast(getToken() ? 'Sessió iniciada.' : 'Sessió tancada.', 'ok');
   };
+}
+
+// ---- Afegir enllaç (qualsevol usuari amb token) ----
+function refreshAddBtn() {
+  const b = $('add-btn');
+  if (!b) return;
+  b.style.display = hasToken() ? '' : 'none';
+  b.onclick = addLink;
+}
+
+async function addLink() {
+  if (!hasToken()) { toast('Cal iniciar sessió amb un token.', 'err'); return; }
+  const raw = prompt('URL del nou enllaç (pots enganxar-ne diversos separats per espais):');
+  if (raw === null) return;
+  const urls = raw.split(/\s+/).map(s => s.trim()).filter(Boolean);
+  if (!urls.length) { toast('Cap URL.', 'err'); return; }
+  try {
+    const res = await api('POST', '/links', urls.length === 1 ? { url: urls[0] } : { urls });
+    // Resposta única (un enllaç) o lot amb { results }.
+    const ids = res.results
+      ? res.results.filter(r => r.link_id).map(r => r.link_id)
+      : (res.link_id ? [res.link_id] : []);
+    // Prepend dels nous links perquè apareguin sense recarregar (encara "pending").
+    for (const id of ids) {
+      try { const l = await api('GET', '/links/' + id); if (l && l.id && !ALL.some(x => x.id === l.id)) ALL.unshift(l); }
+      catch (e) {}
+    }
+    renderStats(); buildFilters(); render();
+    toast(ids.length === 1 ? "Enllaç afegit: s'analitzarà en breu." : ids.length + ' enllaços afegits.', 'ok');
+  } catch (e) { toast('Error afegint: ' + e.message, 'err'); }
 }
 
 // ---- Admin: gestió d'usuaris ----
@@ -969,6 +1000,7 @@ async function maybeFetch() {
   await loadMe();
   initTokenButton();
   refreshAdminBtn();
+  refreshAddBtn();
   await maybeFetch();
   applyHash();
   renderStats();
