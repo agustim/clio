@@ -12,8 +12,35 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(dir.join("css"))?;
     std::fs::create_dir_all(dir.join("js"))?;
 
-    let json = serde_json::to_string(&links)?;
-    let json_pretty = serde_json::to_string_pretty(&links)?;
+    // El resum profund (deep_summary) és el camp més pesat i només es mostra
+    // en obrir el detall. El treiem de l'índex i el desem per-enllaç a
+    // data/deep/{id}.json, carregat mandrosament quan s'obre l'anàlisi.
+    let deep_dir = dir.join("data/deep");
+    if deep_dir.exists() {
+        std::fs::remove_dir_all(&deep_dir)?;
+    }
+    std::fs::create_dir_all(&deep_dir)?;
+
+    let mut index: Vec<serde_json::Value> = Vec::with_capacity(links.len());
+    for l in &links {
+        let mut v = serde_json::to_value(l)?;
+        if let Some(obj) = v.as_object_mut() {
+            let ds = obj.remove("deep_summary");
+            if let Some(s) = ds.as_ref().and_then(|d| d.as_str()) {
+                if !s.is_empty() {
+                    let payload = serde_json::json!({ "deep_summary": s });
+                    std::fs::write(
+                        deep_dir.join(format!("{}.json", l.id)),
+                        serde_json::to_string(&payload)?,
+                    )?;
+                }
+            }
+        }
+        index.push(v);
+    }
+
+    let json = serde_json::to_string(&index)?;
+    let json_pretty = serde_json::to_string_pretty(&index)?;
     // links.json per consum extern; links.js incrustat perquè funcioni via file://
     // (fetch() està bloquejat sota file:// a la majoria de navegadors).
     std::fs::write(dir.join("data/links.json"), json_pretty)?;
@@ -861,17 +888,35 @@ function fmtDur(s) {
 }
 
 // Bloc de la segona passada (deep): anàlisi profunda en text.
+// El text pesat viu a data/deep/{id}.json i es carrega mandrosament en obrir.
 function deepBlock(l) {
-  const parts = [];
-  if (l.deep_summary && l.deep_status === 'done') {
-    parts.push(`<details class="deep">
+  if (l.deep_status === 'done') {
+    return `<details class="deep" data-deep="${esc(l.id)}">
       <summary>🔬 Anàlisi profunda</summary>
-      <div class="deep-md">${md(l.deep_summary)}</div>
-    </details>`);
+      <div class="deep-md"><span class="deep-loading">Carregant…</span></div>
+    </details>`;
   } else if (l.deep_status === 'pending' || l.deep_status === 'processing') {
-    parts.push(`<div class="deep-pending">🔬 Anàlisi profunda en curs…</div>`);
+    return `<div class="deep-pending">🔬 Anàlisi profunda en curs…</div>`;
   }
-  return parts.join('');
+  return '';
+}
+
+// Cache i càrrega mandrosa del resum profund (un fetch per enllaç, un sol cop).
+const DEEP_CACHE = new Map();
+async function loadDeep(det) {
+  const id = det.dataset.deep;
+  if (!id || det.dataset.loaded) return;
+  det.dataset.loaded = '1';
+  const box = det.querySelector('.deep-md');
+  let text = DEEP_CACHE.get(id);
+  if (text === undefined) {
+    try {
+      const r = await fetch('data/deep/' + id + '.json');
+      text = r.ok ? ((await r.json()).deep_summary || '') : '';
+    } catch (e) { text = ''; }
+    DEEP_CACHE.set(id, text);
+  }
+  box.innerHTML = text ? md(text) : '<span class="deep-loading">No disponible.</span>';
 }
 
 function render() {
@@ -943,6 +988,8 @@ function render() {
     card.querySelectorAll('.reporters .user').forEach(ch => {
       ch.onclick = () => setHash('at:' + ch.dataset.user.toLowerCase());
     });
+    const dp = card.querySelector('details.deep');
+    if (dp) dp.addEventListener('toggle', () => { if (dp.open) loadDeep(dp); });
     const hb = card.querySelector('.heart');
     if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
     const rf = card.querySelector('.act-refresh');
