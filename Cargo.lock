@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "linkanalyzer"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "axum",
