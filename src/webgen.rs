@@ -65,8 +65,12 @@ pub fn git_push(cfg: &Config, message: &str) -> Result<()> {
     let dir = &cfg.public_dir;
     let branch = &cfg.git.web_branch;
 
-    // Init repo si cal.
-    if !Path::new(dir).join(".git").exists() {
+    // Init repo si cal. No mirem si existeix `.git` com a path perquè en un
+    // container el bind-mount pot deixar-hi un dir buit o corrupte (git dona
+    // llavors "not in a git directory" al primer `config`). Comprovem que sigui
+    // un repo de veritat; `git init` és idempotent i arregla un `.git` incomplet.
+    let is_repo = run_git(dir, &["rev-parse", "--is-inside-work-tree"]).is_ok();
+    if !is_repo {
         run_git(dir, &["init"])?;
         run_git(dir, &["checkout", "-B", branch])?;
     }
