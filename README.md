@@ -88,6 +88,24 @@ CLONE_TIMEOUT_SECS=120
 CLONE_MAX_MB=200
 ```
 
+### Pàgines protegides (Cloudflare & co.)
+
+Alguns llocs responen `403/429/503` a un GET normal (murs anti-bot). Clio fa dues
+coses:
+
+1. **Capçaleres de navegador** per defecte (UA de Chrome + `Accept`/`Sec-Fetch-*`).
+   Passa la majoria de filtres senzills. Sobreescriu el UA amb `USER_AGENT`.
+2. **Fallback FlareSolverr** per als challenges reals de Cloudflare (JS/Turnstile):
+   si `FLARESOLVERR_URL` està definida, un `403/429/503` es reintenta a través d'un
+   navegador headless que resol el challenge. El `docker-compose.yml` ja inclou el
+   servei `flaresolverr`.
+
+```env
+# Buit = desactivat (els 403 fallen directament).
+FLARESOLVERR_URL=http://flaresolverr:8191
+FLARESOLVERR_TIMEOUT_SECS=60
+```
+
 ## API REST (`/api/v1`)
 
 Auth: `Authorization: Bearer <api_token>`.

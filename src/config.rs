@@ -78,6 +78,13 @@ pub struct Config {
     /// Límit de caràcters per al resum curt (descripció a la targeta web).
     pub summary_max_chars: usize,
     pub user_agent: String,
+    /// URL base d'un FlareSolverr (p.ex. http://flaresolverr:8191). Si està
+    /// definida, s'usa com a fallback quan un GET rep 403/429/503 (murs anti-bot
+    /// tipus Cloudflare). Buit = desactivat.
+    pub flaresolverr_url: Option<String>,
+    /// Timeout (segons) per a la resolució del challenge via FlareSolverr.
+    /// Un navegador headless triga força; per defecte 60s.
+    pub flaresolverr_timeout_secs: u64,
     /// Nombre de workers concurrents de la cua d'anàlisi.
     pub queue_workers: usize,
     /// Interval (segons) de regeneració de la web durant `serve`. 0 = desactivat.
@@ -124,6 +131,9 @@ impl Config {
         let clone_max_mb: u64 = get("CLONE_MAX_MB", "200")
             .parse()
             .map_err(|_| AppError::Config("CLONE_MAX_MB invalid".into()))?;
+        let flaresolverr_timeout_secs: u64 = get("FLARESOLVERR_TIMEOUT_SECS", "60")
+            .parse()
+            .map_err(|_| AppError::Config("FLARESOLVERR_TIMEOUT_SECS invalid".into()))?;
         let embed_dim: usize = get("EMBED_DIM", "256")
             .parse()
             .map_err(|_| AppError::Config("EMBED_DIM invalid".into()))?;
@@ -168,7 +178,13 @@ impl Config {
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
             summary_max_chars,
-            user_agent: get("USER_AGENT", "Clio-LinkAnalyzer/0.1"),
+            user_agent: get(
+                "USER_AGENT",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            ),
+            flaresolverr_url: opt("FLARESOLVERR_URL"),
+            flaresolverr_timeout_secs,
             queue_workers,
             web_regen_secs,
             web_debounce_secs,

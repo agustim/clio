@@ -15,14 +15,39 @@ pub struct Parsed {
     pub og_type: Option<String>,
 }
 
-/// FETCH: descarrega HTML amb UA, timeout i limit de mida.
-pub async fn fetch(http: &reqwest::Client, url: &str, max_bytes: usize) -> Result<String> {
+/// FETCH: descarrega HTML amb capçaleres de navegador, timeout i limit de mida.
+///
+/// Si el servidor respon amb un mur anti-bot (403/429/503) i hi ha un
+/// FlareSolverr configurat (`cfg.flaresolverr_url`), reintenta la descàrrega a
+/// través seu (navegador headless que resol el challenge de Cloudflare & co.).
+pub async fn fetch(http: &reqwest::Client, cfg: &Config, url: &str) -> Result<String> {
+    let max_bytes = cfg.max_link_size_bytes;
+    // Capçaleres que imiten un navegador real: molts murs bloquegen només per la
+    // forma de les capçaleres (UA de bot, falta d'Accept, etc.). El UA ja el posa
+    // el client compartit. No fixem Accept-Encoding: reqwest es compila sense
+    // gzip/brotli i no en descomprimiria el cos.
     let resp = http
         .get(url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .header("Accept-Language", "ca,es;q=0.9,en;q=0.8")
+        .header("Upgrade-Insecure-Requests", "1")
+        .header("Sec-Fetch-Dest", "document")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-User", "?1")
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
 
+    let status = resp.status();
+    if matches!(status.as_u16(), 403 | 429 | 503) {
+        if let Some(base) = cfg.flaresolverr_url.as_deref() {
+            tracing::info!(%url, %status, "fetch bloquejat, reintent via FlareSolverr");
+            return crate::flaresolverr::fetch(base, url, cfg.flaresolverr_timeout_secs, max_bytes)
+                .await;
+        }
+    }
+
+    let resp = resp.error_for_status()?;
     if let Some(len) = resp.content_length() {
         if len as usize > max_bytes {
             return Err(AppError::Pipeline(format!("body too large: {len} bytes")));
@@ -283,7 +308,7 @@ async fn run_inner(
     let parsed = match crate::social::extract(http, url).await? {
         Some(p) => p,
         None => {
-            let html = fetch(http, url, cfg.max_link_size_bytes).await?;
+            let html = fetch(http, cfg, url).await?;
             parse(&html)
         }
     };

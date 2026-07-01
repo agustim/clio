@@ -5,6 +5,7 @@ mod db;
 mod deep;
 mod embed;
 mod error;
+mod flaresolverr;
 mod llm;
 mod models;
 mod normalize;

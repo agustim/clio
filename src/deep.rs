@@ -333,7 +333,7 @@ async fn deep_article(
     llm: Option<&LlmClient>,
     url: &str,
 ) -> Result<String> {
-    let html = pipeline::fetch(http, url, cfg.max_link_size_bytes).await?;
+    let html = pipeline::fetch(http, cfg, url).await?;
     let parsed = pipeline::parse(&html);
     let full: String = parsed.text.chars().take(16000).collect();
 

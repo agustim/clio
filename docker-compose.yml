@@ -18,10 +18,23 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       DATABASE_URL: sqlite://data/linkanalyzer.db
       PUBLIC_DIR: public
+      # Fallback per a pàgines protegides (Cloudflare & co.). Comenta-ho per
+      # desactivar-lo i deixar que els 403 fallin directament.
+      FLARESOLVERR_URL: http://flaresolverr:8191
     volumes:
       - ./data:/app/data                     # persisteix SQLite
       - ./public:/app/public                 # reusa el repo git de la web estàtica
       - ./.fastembed_cache:/app/.fastembed_cache  # no re-descarrega el model
+    depends_on:
+      - flaresolverr
+
+  # Resol challenges anti-bot (Cloudflare) amb un Chromium headless. Només
+  # l'usa clio per la xarxa interna; no cal publicar-ne el port.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
 
   cloudflared:
     image: cloudflare/cloudflared:latest
