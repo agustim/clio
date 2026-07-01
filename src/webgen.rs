@@ -112,7 +112,12 @@ fn inject_token(url: &str, token: &str) -> String {
 }
 
 fn run_git(dir: &str, args: &[&str]) -> Result<()> {
+    // `safe.directory=*` desactiva el check d'ownership de git: dins el container
+    // el procés corre com a root però els fitxers de public/ són d'un altre uid
+    // (bind-mount), i git peta amb "detected dubious ownership". Aquí no hi ha
+    // risc: és un repo derivat i d'un sol escriptor.
     let out = Command::new("git")
+        .args(["-c", "safe.directory=*"])
         .arg("-C")
         .arg(dir)
         .args(args)
