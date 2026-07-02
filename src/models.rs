@@ -27,7 +27,8 @@ macro_rules! str_enum {
     };
 }
 
-str_enum!(UserRole { Admin => "admin", User => "user" }, default = User);
+str_enum!(UserRole { Admin => "admin", User => "user", Npc => "npc" }, default = User);
+str_enum!(FeedKind { Rss => "rss", Scrape => "scrape" }, default = Rss);
 str_enum!(LinkType {
     News => "news", Repo => "repo", Article => "article",
     Video => "video", Blog => "blog", Social => "social", Other => "other"
@@ -58,6 +59,24 @@ pub struct User {
     /// d'usuaris amb aquest camp informat.
     #[serde(default)]
     pub telegram_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Font que un NPC recull periòdicament. `kind=rss` implementat; `scrape`
+/// reservat per a la 2a fase (pàgina → notícies via IA).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Feed {
+    pub id: Uuid,
+    /// NPC propietari (users.role = 'npc').
+    pub user_id: Uuid,
+    pub kind: FeedKind,
+    /// URL del feed (RSS/Atom) o de la pàgina a scrapejar.
+    pub source: String,
+    /// Període mínim entre col·lectes, en segons.
+    pub interval_s: i64,
+    /// Últim intent de col·lecta (None = mai; venç immediatament).
+    pub last_run: Option<DateTime<Utc>>,
+    pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
 

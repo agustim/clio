@@ -63,6 +63,7 @@ impl Db {
             ("003_embeddings", include_str!("../migrations/003_embeddings.sql")),
             ("004_telegram", include_str!("../migrations/004_telegram.sql")),
             ("005_social", include_str!("../migrations/005_social.sql")),
+            ("006_feeds", include_str!("../migrations/006_feeds.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -209,6 +210,80 @@ impl Db {
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() > 0)
+    }
+
+    // ---- Feeds (col·lectors NPC) ----
+    const FEED_COLS: &'static str =
+        "id, user_id, kind, source, interval_s, last_run, enabled, created_at";
+
+    fn row_to_feed(r: &sqlx::sqlite::SqliteRow) -> Feed {
+        let last_run: Option<String> = r.get("last_run");
+        Feed {
+            id: parse_uuid(r.get::<String, _>("id").as_str()),
+            user_id: parse_uuid(r.get::<String, _>("user_id").as_str()),
+            kind: FeedKind::from_db(r.get::<String, _>("kind").as_str()),
+            source: r.get("source"),
+            interval_s: r.get("interval_s"),
+            last_run: last_run.as_deref().map(parse_ts),
+            enabled: r.get::<i64, _>("enabled") != 0,
+            created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
+        }
+    }
+
+    pub async fn create_feed(
+        &self,
+        user_id: Uuid,
+        kind: FeedKind,
+        source: &str,
+        interval_s: i64,
+    ) -> Result<Feed> {
+        let id = Uuid::new_v4();
+        let created = now_str();
+        sqlx::query(
+            "INSERT INTO feeds (id, user_id, kind, source, interval_s, enabled, created_at) \
+             VALUES (?, ?, ?, ?, ?, 1, ?)",
+        )
+        .bind(id.to_string())
+        .bind(user_id.to_string())
+        .bind(kind.as_str())
+        .bind(source)
+        .bind(interval_s)
+        .bind(&created)
+        .execute(&self.pool)
+        .await?;
+        Ok(Feed {
+            id,
+            user_id,
+            kind,
+            source: source.to_string(),
+            interval_s,
+            last_run: None,
+            enabled: true,
+            created_at: parse_ts(&created),
+        })
+    }
+
+    pub async fn list_feeds(&self) -> Result<Vec<Feed>> {
+        let q = format!("SELECT {} FROM feeds ORDER BY created_at", Self::FEED_COLS);
+        let rows = sqlx::query(&q).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(Self::row_to_feed).collect())
+    }
+
+    pub async fn enabled_feeds(&self) -> Result<Vec<Feed>> {
+        let q = format!("SELECT {} FROM feeds WHERE enabled = 1", Self::FEED_COLS);
+        let rows = sqlx::query(&q).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(Self::row_to_feed).collect())
+    }
+
+    /// Marca l'últim intent de col·lecta (encara que falli) per no reintentar
+    /// en bucle tancat.
+    pub async fn touch_feed(&self, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE feeds SET last_run = ? WHERE id = ?")
+            .bind(now_str())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Retorna l'usuari local de la CLI, creant-lo si cal.

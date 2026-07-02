@@ -51,6 +51,22 @@ pub enum Cmd {
     },
     /// Commit + push de la web (opt-in, requereix WEB_REPO_URL)
     Push,
+    /// Crea un NPC (usuari col·lector automàtic) i mostra el seu api_token
+    NpcAdd {
+        username: String,
+    },
+    /// Afegeix un feed RSS/Atom a un NPC
+    FeedAdd {
+        /// username de l'NPC propietari
+        npc: String,
+        /// URL del feed RSS/Atom
+        url: String,
+        /// Període mínim entre col·lectes, en segons
+        #[arg(long, default_value_t = 3600)]
+        interval: i64,
+    },
+    /// Llista els feeds configurats
+    FeedList,
 }
 
 pub async fn run(
@@ -178,6 +194,51 @@ pub async fn run(
             println!("Push completat (o omès si no configurat).");
             Ok(())
         }
+        Cmd::NpcAdd { username } => {
+            let user = state.db.create_user(&username, UserRole::Npc).await?;
+            println!("NPC creat: {} ({})", user.username, user.id);
+            println!("API token: {}", user.api_token);
+            Ok(())
+        }
+        Cmd::FeedAdd { npc, url, interval } => {
+            let user = state
+                .db
+                .user_by_username(&npc)
+                .await?
+                .ok_or_else(|| AppError::BadRequest(format!("NPC '{npc}' no existeix")))?;
+            let feed = state
+                .db
+                .create_feed(user.id, crate::models::FeedKind::Rss, &url, interval)
+                .await?;
+            println!(
+                "Feed RSS afegit a @{}: {} (cada {}s)",
+                npc, feed.source, feed.interval_s
+            );
+            Ok(())
+        }
+        Cmd::FeedList => {
+            let feeds = state.db.list_feeds().await?;
+            if feeds.is_empty() {
+                println!("(cap feed)");
+            }
+            for f in feeds {
+                let owner = state
+                    .db
+                    .user_by_id(f.user_id)
+                    .await?
+                    .map(|u| u.username)
+                    .unwrap_or_default();
+                println!(
+                    "[{}] {} @{} cada {}s  {}",
+                    f.kind,
+                    if f.enabled { "on" } else { "off" },
+                    owner,
+                    f.interval_s,
+                    f.source
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -236,6 +297,10 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
     // Bot en background (stub).
     let bot_state = state.clone();
     tokio::spawn(async move { telegram::run(bot_state).await });
+
+    // Col·lectors NPC (RSS ara; scrape més endavant).
+    let feeds_state = state.clone();
+    tokio::spawn(async move { crate::feeds::run(feeds_state).await });
 
     let public_dir = state.cfg.public_dir.clone();
     let app = api::router(state);

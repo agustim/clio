@@ -18,6 +18,7 @@ Implementació de [definition.md](definition.md). Abast actual: API + CLI + pipe
 | Client LLM (OpenAI-compat) | [src/llm.rs](src/llm.rs) |
 | Embeddings (local/HTTP) | [src/embed.rs](src/embed.rs) |
 | Extractors xarxes socials | [src/social.rs](src/social.rs) |
+| Col·lectors NPC (RSS) | [src/feeds.rs](src/feeds.rs) |
 | Bot de Telegram | [src/telegram.rs](src/telegram.rs) |
 | Orquestració (AppState) | [src/service.rs](src/service.rs) |
 | API REST (axum) | [src/api.rs](src/api.rs) |
@@ -39,7 +40,7 @@ $DB reindex                   # backfill d'embeddings dels links existents
 $DB serve                     # API + bot a http://127.0.0.1:8080
 ```
 
-Subcomandes: `serve`, `user-add`, `add`, `list`, `generate`, `reindex`, `reprocess`, `delete`, `push`.
+Subcomandes: `serve`, `user-add`, `add`, `list`, `generate`, `reindex`, `reprocess`, `delete`, `push`, `npc-add`, `feed-add`, `feed-list`.
 
 ## LLM (vLLM / OpenAI / Ollama)
 
@@ -125,6 +126,23 @@ Si `TELEGRAM_BOT_TOKEN` està definit, `serve` arrenca el bot. Accepta links d'u
 TELEGRAM_BOT_TOKEN=
 ADMIN_CHAT_ID=
 ```
+
+## Col·lectors NPC (RSS)
+
+Un **NPC** és un usuari automàtic (`role = npc`) que recull enllaços de fonts externes i els reporta pel **mateix camí** que qualsevol usuari (`report_link` → dedup → co-reporting → pipeline). No cal codi nou al pipeline: els seus links s'analitzen, resumeixen i indexen igual, i apareix com a reporter (`@npcname`) a la web.
+
+Cada NPC té un o més **feeds** (taula `feeds`): una font + un període. El scheduler ([src/feeds.rs](src/feeds.rs)), que arrenca amb `serve`, revisa cada 60 s els feeds habilitats i col·lecta els que han vençut (`now - last_run >= interval_s`). Màxim 25 entrades per col·lecta (evita inundar el ranking); `last_run` es marca encara que falli (no reintenta en bucle).
+
+```bash
+linkanalyzer npc-add hackernews                                         # crea NPC -> imprimeix api_token
+linkanalyzer feed-add hackernews https://hnrss.org/frontpage --interval 1800   # feed RSS/Atom (segons)
+linkanalyzer feed-list                                                  # llista feeds
+linkanalyzer serve                                                      # el scheduler arrenca sol
+```
+
+Dedup i co-reporting són automàtics: si un feed re-veu un link ja existent, s'afegeix l'NPC com a co-reporter (no es duplica). El feed pren el primer `<link>` de cada entrada.
+
+**Fase 2 (pendent): scrape.** `FeedKind::Scrape` i la columna `config_json` ja estan reservats. La idea: `pipeline::fetch` (amb fallback FlareSolverr) baixa l'HTML i una passada d'IA el converteix en notícies. Encara no implementat.
 
 ## Git push + deploy reactiu (opt-in)
 
