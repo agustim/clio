@@ -22,8 +22,10 @@ services:
       # desactivar-lo i deixar que els 403 fallin directament.
       FLARESOLVERR_URL: http://flaresolverr:8191
     volumes:
-      - ./data:/app/data                     # persisteix SQLite
-      - ./public:/app/public                 # reusa el repo git de la web estàtica
+      - ./data:/app/data                     # persisteix SQLite (font de veritat)
+      # public/ NO es munta: es genera dins el container (propietat de root) i es
+      # publica per git push --force al remot. Efímer i derivat de la DB; evita el
+      # conflicte d'ownership de git en compartir el .git del host (uid 1000).
       - ./.fastembed_cache:/app/.fastembed_cache  # no re-descarrega el model
     depends_on:
       - flaresolverr
