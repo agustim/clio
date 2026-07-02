@@ -1,6 +1,6 @@
 [package]
 name = "linkanalyzer"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "Clio (LinkAnalyzer): recull, analitza i publica enllaços"
 
