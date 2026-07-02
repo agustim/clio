@@ -140,6 +140,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clio · LinkAnalyzer</title>
   <meta name="description" content="Enllaços recollits, analitzats i resumits per Clio.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%230d1117'/%3E%3Ctext x='50' y='50' font-size='60' text-anchor='middle' dominant-baseline='central' fill='%2358a6ff'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -159,6 +160,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
           <span class="theme-icon"></span>
         </button>
+        <button id="cols-dec" class="theme-toggle cols-btn" aria-label="Menys columnes" title="Menys columnes">−</button>
+        <button id="cols-inc" class="theme-toggle cols-btn" aria-label="Més columnes" title="Més columnes">+</button>
       </div>
     </div>
     <div class="topbar-inner controls">
@@ -249,6 +252,7 @@ body {
 .theme-toggle:hover { background: var(--card-hover); transform: translateY(-1px); }
 .theme-icon::before { content: "🌙"; font-size: 1.1rem; }
 html[data-theme="light"] .theme-icon::before { content: "☀️"; }
+.cols-btn { font-size: 1.3rem; font-weight: 600; line-height: 1; }
 
 .controls { margin-top: .85rem; flex-wrap: wrap; }
 .search-wrap { position: relative; flex: 1 1 280px; min-width: 220px; }
@@ -296,11 +300,26 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
   transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
 }
 .card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow); }
-.card-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
-.card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em;
+.card-top { display: flex; align-items: center; justify-content: center; gap: .5rem; }
+.card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em; text-align: center;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .card h2 a { color: var(--fg); text-decoration: none; }
 .card h2 a:hover { color: var(--accent); }
+
+/* Fila 2: tipus + cor a l'esquerra, pestanyes I/A/D a la dreta */
+.card-row2 { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.card-row2-left { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+.card-tabs { display: flex; gap: .3rem; flex: none; }
+.card-tabs .tab {
+  width: 30px; height: 30px; border-radius: 8px; cursor: pointer; font-size: .9rem;
+  border: 1px solid var(--border); background: var(--card); color: var(--fg);
+  display: grid; place-items: center; transition: all var(--transition);
+}
+.card-tabs .tab:hover { background: var(--card-hover); }
+.card-tabs .tab.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.card-tabs .tab:disabled { opacity: .35; cursor: not-allowed; }
+.card-panels { min-height: 1px; }
+.card-panels .panel[hidden] { display: none; }
 
 .badge {
   flex: none; font-size: .66rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
@@ -837,6 +856,37 @@ function initTheme() {
   });
 }
 
+// ---- Nombre de columnes de la graella (desat a cookie) ----
+// 0 = automàtic (per defecte del CSS). >0 força N columnes.
+function readCols() {
+  const m = document.cookie.match(/(?:^|;\s*)clio_cols=(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+function writeCols(n) {
+  document.cookie = 'clio_cols=' + n + '; path=/; max-age=31536000; SameSite=Lax';
+}
+function applyCols() {
+  const n = readCols();
+  const g = $('grid');
+  g.style.gridTemplateColumns = n > 0 ? `repeat(${n}, minmax(0, 1fr))` : '';
+}
+// Columnes actuals: la cookie si hi és, altrament les que calcula el CSS auto-fill.
+function curCols() {
+  const n = readCols();
+  if (n > 0) return n;
+  const cs = getComputedStyle($('grid')).gridTemplateColumns;
+  return cs && cs !== 'none' ? cs.split(' ').length : 1;
+}
+function initCols() {
+  applyCols();
+  $('cols-inc').addEventListener('click', () => {
+    writeCols(Math.min(curCols() + 1, 8)); applyCols();
+  });
+  $('cols-dec').addEventListener('click', () => {
+    writeCols(Math.max(curCols() - 1, 1)); applyCols();
+  });
+}
+
 function buildFilters() {
   const counts = {};
   ALL.forEach(l => (l.tags || []).forEach(t => counts[t] = (counts[t]||0)+1));
@@ -898,25 +948,22 @@ function fmtDur(s) {
 
 // Bloc de la segona passada (deep): anàlisi profunda en text.
 // El text pesat viu a data/deep/{id}.json i es carrega mandrosament en obrir.
-function deepBlock(l) {
+function deepPanel(l) {
   if (l.deep_status === 'done') {
-    return `<details class="deep" data-deep="${esc(l.id)}">
-      <summary>🔬 Anàlisi profunda</summary>
-      <div class="deep-md"><span class="deep-loading">Carregant…</span></div>
-    </details>`;
+    return `<div class="deep-md" data-deep="${esc(l.id)}"><span class="deep-loading">Carregant…</span></div>`;
   } else if (l.deep_status === 'pending' || l.deep_status === 'processing') {
     return `<div class="deep-pending">🔬 Anàlisi profunda en curs…</div>`;
   }
-  return '';
+  return `<div class="deep-pending">Sense anàlisi profunda.</div>`;
 }
+function deepAvailable(l) { return l.deep_status === 'done'; }
 
 // Cache i càrrega mandrosa del resum profund (un fetch per enllaç, un sol cop).
 const DEEP_CACHE = new Map();
-async function loadDeep(det) {
-  const id = det.dataset.deep;
-  if (!id || det.dataset.loaded) return;
-  det.dataset.loaded = '1';
-  const box = det.querySelector('.deep-md');
+async function loadDeep(box) {
+  const id = box.dataset.deep;
+  if (!id || box.dataset.loaded) return;
+  box.dataset.loaded = '1';
   let text = DEEP_CACHE.get(id);
   if (text === undefined) {
     try {
@@ -970,23 +1017,31 @@ function render() {
     card.innerHTML = `
       <div class="card-top">
         <h2><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title || l.url)}</a></h2>
-        <div class="card-top-right">
+      </div>
+      <div class="card-row2">
+        <div class="card-row2-left">
           ${isNew(l) ? '<span class="badge-new" title="Nou des de la teva última visita">NOU</span>' : ''}
           <span class="badge t-${type}">${type}</span>
           ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
         </div>
-      </div>
-      <p class="summary">${esc(summaryText(l.summary))}</p>
-      ${deepBlock(l)}
-      <details class="card-extra">
-        <summary>Detalls</summary>
-        ${repoBlock(l)}
-        <div class="tags">${tags}</div>
-        <div class="meta">
-          <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
-          <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
+        <div class="card-tabs">
+          <button class="tab on" data-panel="info" title="Info">ℹ️</button>
+          <button class="tab" data-panel="deep" title="Anàlisi profunda"${deepAvailable(l) ? '' : ' disabled'}>🔬</button>
+          <button class="tab" data-panel="details" title="Detalls">📋</button>
         </div>
-      </details>
+      </div>
+      <div class="card-panels">
+        <div class="panel" data-panel="info"><p class="summary">${esc(summaryText(l.summary))}</p></div>
+        <div class="panel" data-panel="deep" hidden>${deepPanel(l)}</div>
+        <div class="panel" data-panel="details" hidden>
+          ${repoBlock(l)}
+          <div class="tags">${tags}</div>
+          <div class="meta">
+            <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
+            <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
+          </div>
+        </div>
+      </div>
       ${hasToken() ? `<div class="actions">
         <button class="act act-refresh" data-id="${esc(l.id)}" title="Reforça: torna a analitzar">↻ Refer</button>
         <button class="act act-delete" data-id="${esc(l.id)}" title="Dona de baixa aquest link">🗑 Baixa</button>
@@ -997,8 +1052,18 @@ function render() {
     card.querySelectorAll('.reporters .user').forEach(ch => {
       ch.onclick = () => setHash('at:' + ch.dataset.user.toLowerCase());
     });
-    const dp = card.querySelector('details.deep');
-    if (dp) dp.addEventListener('toggle', () => { if (dp.open) loadDeep(dp); });
+    const tabs = card.querySelectorAll('.card-tabs .tab');
+    const panels = card.querySelectorAll('.card-panels .panel');
+    tabs.forEach(t => t.addEventListener('click', () => {
+      if (t.disabled) return;
+      const name = t.dataset.panel;
+      tabs.forEach(x => x.classList.toggle('on', x === t));
+      panels.forEach(p => p.hidden = p.dataset.panel !== name);
+      if (name === 'deep') {
+        const box = card.querySelector('.panel[data-panel="deep"] .deep-md');
+        if (box) loadDeep(box);
+      }
+    }));
     const hb = card.querySelector('.heart');
     if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
     const rf = card.querySelector('.act-refresh');
@@ -1052,6 +1117,7 @@ async function maybeFetch() {
 
 (async function init() {
   initTheme();
+  initCols();
   await probeApi();
   await loadMe();
   initTokenButton();
