@@ -405,6 +405,7 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 }
 .act:hover { color: var(--fg); border-color: var(--accent); }
 .act-delete:hover { color: var(--neg); border-color: var(--neg); }
+.act-block:hover { color: var(--neg); border-color: var(--neg); }
 
 /* Toast */
 .toast {
@@ -569,6 +570,16 @@ async function deleteLink(id) {
     renderStats(); buildFilters(); render();
     toast('Link donat de baixa.', 'ok');
   } catch (e) { toast('Error en donar de baixa: ' + e.message, 'err'); }
+}
+async function blockLink(id) {
+  if (!confirm('Bloquejar aquest URL? S\'afegirà a la blocklist i el link s\'esborrarà.')) return;
+  try {
+    await api('POST', '/links/' + id + '/block');
+    ALL = ALL.filter(l => l.id !== id);
+    hearts.delete(id);
+    renderStats(); buildFilters(); render();
+    toast('URL bloquejada i link esborrat.', 'ok');
+  } catch (e) { toast('Error en bloquejar: ' + e.message, 'err'); }
 }
 
 function initTokenButton() {
@@ -1045,6 +1056,7 @@ function render() {
       ${hasToken() ? `<div class="actions">
         <button class="act act-refresh" data-id="${esc(l.id)}" title="Reforça: torna a analitzar">↻ Refer</button>
         <button class="act act-delete" data-id="${esc(l.id)}" title="Dona de baixa aquest link">🗑 Baixa</button>
+        ${isAdmin() ? `<button class="act act-block" data-id="${esc(l.id)}" title="Bloqueja aquest URL: l'afegeix a la blocklist i esborra el link">🚫 Bloqueja</button>` : ''}
       </div>` : ''}`;
     card.querySelectorAll('.tags .chip').forEach(ch => {
       ch.onclick = () => setHash('tag:' + ch.dataset.tag);
@@ -1070,6 +1082,8 @@ function render() {
     if (rf) rf.onclick = () => reprocessLink(l.id);
     const dl = card.querySelector('.act-delete');
     if (dl) dl.onclick = () => deleteLink(l.id);
+    const bl = card.querySelector('.act-block');
+    if (bl) bl.onclick = () => blockLink(l.id);
     grid.appendChild(card);
   });
 

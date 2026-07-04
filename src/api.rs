@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/links", post(create_link).get(list_links))
         .route("/api/v1/links/:id", get(get_link).delete(delete_link))
         .route("/api/v1/links/:id/reprocess", post(reprocess_link))
+        .route("/api/v1/links/:id/block", post(block_link))
         .route("/api/v1/users", get(users_list).post(users_create))
         .route("/api/v1/users/:id", patch(users_update).delete(users_delete))
         .route("/api/v1/users/:id/token", post(users_regen_token))
@@ -317,6 +318,25 @@ async fn delete_link(
         state.web_dirty.notify_one();
     }
     Ok(Json(json!({ "link_id": uuid, "deleted": deleted })))
+}
+
+/// Bloqueja un link: afegeix la seva URL a la blocklist i l'esborra. Només
+/// admins (afecta la blocklist global, no només aquest link).
+async fn block_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>> {
+    let user = auth(&state, &headers, None).await?;
+    if user.role != UserRole::Admin {
+        return Err(AppError::Forbidden);
+    }
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    let blocked = state.block_link(uuid).await?;
+    if blocked {
+        state.web_dirty.notify_one();
+    }
+    Ok(Json(json!({ "link_id": uuid, "blocked": blocked })))
 }
 
 async fn stats(State(state): State<AppState>) -> Result<Json<Value>> {
