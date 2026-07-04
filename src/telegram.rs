@@ -37,10 +37,15 @@ impl Notifier {
     /// Avís d'error amb botons d'acció (esborrar / reintentar el link).
     pub async fn send_error(&self, text: &str, link_id: Uuid) {
         let markup = json!({
-            "inline_keyboard": [[
-                { "text": "🗑 Esborra", "callback_data": format!("del:{link_id}") },
-                { "text": "🔁 Reintenta", "callback_data": format!("retry:{link_id}") },
-            ]]
+            "inline_keyboard": [
+                [
+                    { "text": "🗑 Esborra", "callback_data": format!("del:{link_id}") },
+                    { "text": "🔁 Reintenta", "callback_data": format!("retry:{link_id}") },
+                ],
+                [
+                    { "text": "🚫 Bloqueja", "callback_data": format!("block:{link_id}") },
+                ],
+            ]
         });
         send_message(&self.http, &self.base, self.chat_id, text, Some(markup)).await;
     }
@@ -200,6 +205,14 @@ async fn handle_callback(state: &AppState, http: &reqwest::Client, base: &str, c
             Err(e) => {
                 tracing::warn!(error = %e, %link_id, "telegram: reintent ha fallat");
                 "Error reencuant el link."
+            }
+        },
+        "block" => match state.block_link(link_id).await {
+            Ok(true) => "🚫 URL bloquejada i link esborrat.",
+            Ok(false) => "El link ja no existeix.",
+            Err(e) => {
+                tracing::warn!(error = %e, %link_id, "telegram: bloqueig ha fallat");
+                "Error bloquejant el link."
             }
         },
         _ => "Acció desconeguda.",

@@ -138,6 +138,21 @@ impl AppState {
         }
     }
 
+    /// Bloqueja el link: afegeix la seva URL (exacta) a la blocklist i
+    /// l'esborra. Retorna false si el link ja no existeix.
+    pub async fn block_link(&self, link_id: Uuid) -> Result<bool> {
+        let Some(link) = self.db.link_by_id(link_id).await? else {
+            return Ok(false);
+        };
+        let pattern = format!("^{}$", regex::escape(&link.url));
+        // Un patró duplicat (ja bloquejat) no ha d'impedir l'esborrat.
+        if let Err(e) = self.db.add_block(&pattern, Some("via telegram")).await {
+            tracing::warn!(error = %e, %pattern, "block_link: add_block (potser duplicat)");
+        }
+        self.db.delete_link(link_id).await?;
+        Ok(true)
+    }
+
     /// Reencua un link: torna l'estat a Pending i el posa a la cua shallow.
     pub async fn retry_link(&self, link_id: Uuid) -> Result<()> {
         self.db.set_link_status(link_id, LinkStatus::Pending).await?;
