@@ -64,6 +64,7 @@ impl Db {
             ("004_telegram", include_str!("../migrations/004_telegram.sql")),
             ("005_social", include_str!("../migrations/005_social.sql")),
             ("006_feeds", include_str!("../migrations/006_feeds.sql")),
+            ("007_blocklist", include_str!("../migrations/007_blocklist.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -214,7 +215,7 @@ impl Db {
 
     // ---- Feeds (col·lectors NPC) ----
     const FEED_COLS: &'static str =
-        "id, user_id, kind, source, interval_s, last_run, enabled, created_at";
+        "id, user_id, kind, source, interval_s, last_run, enabled, delete_on_fail, created_at";
 
     fn row_to_feed(r: &sqlx::sqlite::SqliteRow) -> Feed {
         let last_run: Option<String> = r.get("last_run");
@@ -226,6 +227,7 @@ impl Db {
             interval_s: r.get("interval_s"),
             last_run: last_run.as_deref().map(parse_ts),
             enabled: r.get::<i64, _>("enabled") != 0,
+            delete_on_fail: r.get::<i64, _>("delete_on_fail") != 0,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
         }
     }
@@ -259,8 +261,84 @@ impl Db {
             interval_s,
             last_run: None,
             enabled: true,
+            delete_on_fail: false,
             created_at: parse_ts(&created),
         })
+    }
+
+    /// Activa/desactiva l'auto-esborrat en fallada per a un feed (per source).
+    /// Retorna quants feeds ha afectat.
+    pub async fn set_feed_delete_on_fail(&self, source: &str, on: bool) -> Result<u64> {
+        let res = sqlx::query("UPDATE feeds SET delete_on_fail = ? WHERE source = ?")
+            .bind(on as i64)
+            .bind(source)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Cert si el link té algun reporter que és NPC d'un feed amb
+    /// `delete_on_fail` actiu (=> en fallar, s'ha d'esborrar automàticament).
+    pub async fn link_from_delete_on_fail_source(&self, link_id: Uuid) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM reports r JOIN feeds f ON f.user_id = r.user_id \
+             WHERE r.link_id = ? AND f.delete_on_fail = 1 LIMIT 1",
+        )
+        .bind(link_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Afegeix un patró a la blocklist. Error si el patró ja existeix.
+    pub async fn add_block(&self, pattern: &str, note: Option<&str>) -> Result<BlockRule> {
+        let id = Uuid::new_v4();
+        let created = now_str();
+        sqlx::query("INSERT INTO blocklist (id, pattern, note, created_at) VALUES (?, ?, ?, ?)")
+            .bind(id.to_string())
+            .bind(pattern)
+            .bind(note)
+            .bind(&created)
+            .execute(&self.pool)
+            .await?;
+        Ok(BlockRule {
+            id,
+            pattern: pattern.to_string(),
+            note: note.map(str::to_string),
+            created_at: parse_ts(&created),
+        })
+    }
+
+    /// Elimina un patró de la blocklist (per text exacte). Retorna si existia.
+    pub async fn remove_block(&self, pattern: &str) -> Result<bool> {
+        let res = sqlx::query("DELETE FROM blocklist WHERE pattern = ?")
+            .bind(pattern)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn list_blocks(&self) -> Result<Vec<BlockRule>> {
+        let rows = sqlx::query("SELECT id, pattern, note, created_at FROM blocklist ORDER BY created_at")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| BlockRule {
+                id: parse_uuid(r.get::<String, _>("id").as_str()),
+                pattern: r.get("pattern"),
+                note: r.get("note"),
+                created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
+            })
+            .collect())
+    }
+
+    /// Només els patrons (per comprovar URLs entrants a report_link).
+    pub async fn blocklist_patterns(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT pattern FROM blocklist")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("pattern")).collect())
     }
 
     pub async fn list_feeds(&self) -> Result<Vec<Feed>> {

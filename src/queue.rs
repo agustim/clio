@@ -66,15 +66,31 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
     }
 }
 
-/// Avisa l'admin d'una feina fallida (inclou la URL si es pot resoldre).
+/// Gestiona una feina fallida. Si el link ve d'una font amb `delete_on_fail`,
+/// l'esborra automàticament (i avisa sense botons). Si no, avisa amb botons
+/// perquè l'admin decideixi (esborrar / reintentar).
 async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) {
-    if state.notifier.is_none() {
-        return;
-    }
     let url = match state.db.link_by_id(link_id).await {
         Ok(Some(l)) => l.url,
         _ => link_id.to_string(),
     };
+
+    // Auto-esborrat: fonts marcades com a delete_on_fail no s'acumulen en 'failed'.
+    match state.db.link_from_delete_on_fail_source(link_id).await {
+        Ok(true) => {
+            match state.db.delete_link(link_id).await {
+                Ok(_) => tracing::info!(%link_id, %url, "auto-esborrat (font delete_on_fail)"),
+                Err(e) => tracing::warn!(error = %e, %link_id, "auto-esborrat fallit"),
+            }
+            state
+                .notify(&format!("🗑 {what} fallida — link esborrat (font auto)\n{url}\n{err}"))
+                .await;
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, %link_id, "consulta delete_on_fail fallida"),
+    }
+
     state.notify_error(&format!("⚠️ {what} fallida\n{url}\n{err}"), link_id).await;
 }
 

@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("invalid input: {0}")]
     BadRequest(String),
 
+    #[error("blocked url: {0}")]
+    Blocked(String),
+
     #[error("unauthorized")]
     Unauthorized,
 
@@ -45,6 +48,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Blocked(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,

@@ -67,6 +67,28 @@ pub enum Cmd {
     },
     /// Llista els feeds configurats
     FeedList,
+    /// Activa/desactiva l'auto-esborrat en fallada d'una font (per URL de feed)
+    FeedAutodelete {
+        /// URL del feed (source) a modificar
+        source: String,
+        /// Desactiva-ho (per defecte activa)
+        #[arg(long)]
+        off: bool,
+    },
+    /// Afegeix un patró (regex) a la blocklist d'URLs
+    BlockAdd {
+        /// Regex que es compara amb la URL normalitzada
+        pattern: String,
+        /// Nota opcional
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Elimina un patró de la blocklist (text exacte)
+    BlockRemove {
+        pattern: String,
+    },
+    /// Llista la blocklist
+    BlockList,
 }
 
 pub async fn run(
@@ -229,13 +251,55 @@ pub async fn run(
                     .map(|u| u.username)
                     .unwrap_or_default();
                 println!(
-                    "[{}] {} @{} cada {}s  {}",
+                    "[{}] {} @{} cada {}s{}  {}",
                     f.kind,
                     if f.enabled { "on" } else { "off" },
                     owner,
                     f.interval_s,
+                    if f.delete_on_fail { " autodel" } else { "" },
                     f.source
                 );
+            }
+            Ok(())
+        }
+        Cmd::FeedAutodelete { source, off } => {
+            let n = state.db.set_feed_delete_on_fail(&source, !off).await?;
+            if n == 0 {
+                println!("Cap feed amb source '{source}'");
+            } else {
+                println!(
+                    "Auto-esborrat {} per {source}",
+                    if off { "desactivat" } else { "activat" }
+                );
+            }
+            Ok(())
+        }
+        Cmd::BlockAdd { pattern, note } => {
+            // Valida el regex abans de desar-lo.
+            regex::Regex::new(&pattern)
+                .map_err(|e| AppError::BadRequest(format!("regex invàlid: {e}")))?;
+            state.db.add_block(&pattern, note.as_deref()).await?;
+            println!("Bloquejat: {pattern}");
+            Ok(())
+        }
+        Cmd::BlockRemove { pattern } => {
+            if state.db.remove_block(&pattern).await? {
+                println!("Eliminat de la blocklist: {pattern}");
+            } else {
+                println!("No hi era: {pattern}");
+            }
+            Ok(())
+        }
+        Cmd::BlockList => {
+            let blocks = state.db.list_blocks().await?;
+            if blocks.is_empty() {
+                println!("(blocklist buida)");
+            }
+            for b in blocks {
+                match b.note {
+                    Some(n) => println!("{}  — {}", b.pattern, n),
+                    None => println!("{}", b.pattern),
+                }
             }
             Ok(())
         }

@@ -145,18 +145,26 @@ async fn handle_update(state: &AppState, http: &reqwest::Client, base: &str, up:
     if urls.is_empty() {
         return;
     }
+    let mut queued = 0usize;
+    let mut blocked = 0usize;
     for raw in &urls {
         match state.report_link(&user, raw).await {
             Ok(o) => {
                 if o.needs_processing {
                     state.enqueue(o.link_id);
                 }
+                queued += 1;
             }
+            Err(crate::error::AppError::Blocked(_)) => blocked += 1,
             Err(e) => tracing::warn!(error = %e, url = %raw, "telegram: report_link ha fallat"),
         }
     }
-    send_message(http, base, chat_id, "Processant url.", None).await;
-    tracing::info!(user = %user.username, n = urls.len(), "telegram: links encuats");
+    let reply = match (queued, blocked) {
+        (0, b) if b > 0 => "Link no acceptat (a la blocklist).",
+        _ => "Processant url.",
+    };
+    send_message(http, base, chat_id, reply, None).await;
+    tracing::info!(user = %user.username, queued, blocked, "telegram: links processats");
 }
 
 /// Gestiona els botons dels avisos d'error (esborra / reintenta). Només accepta

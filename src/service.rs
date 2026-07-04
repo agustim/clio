@@ -67,6 +67,11 @@ impl AppState {
     pub async fn report_link(&self, user: &User, raw_url: &str) -> Result<ReportOutcome> {
         let url = normalize_url(raw_url)?;
 
+        // Blocklist: rebutja URLs que facin match amb algun patró (regex).
+        if let Some(pat) = self.blocklist_match(&url).await {
+            return Err(crate::error::AppError::Blocked(pat));
+        }
+
         if let Some(existing) = self.db.link_by_url(&url).await? {
             // Co-report: afegeix reporter + report.
             let added = self.db.add_co_reporter(existing.id, user.id).await?;
@@ -91,6 +96,27 @@ impl AppState {
             added_reporter: true,
             needs_processing: true,
         })
+    }
+
+    /// Retorna el primer patró de la blocklist que fa match amb la URL, si n'hi
+    /// ha cap. Els patrons són regex; els invàlids es registren i s'ignoren.
+    async fn blocklist_match(&self, url: &str) -> Option<String> {
+        let patterns = match self.db.blocklist_patterns().await {
+            Ok(p) if !p.is_empty() => p,
+            Ok(_) => return None,
+            Err(e) => {
+                tracing::warn!(error = %e, "blocklist: lectura fallida");
+                return None;
+            }
+        };
+        for pat in patterns {
+            match regex::Regex::new(&pat) {
+                Ok(re) if re.is_match(url) => return Some(pat),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(pattern = %pat, error = %e, "blocklist: regex invàlid"),
+            }
+        }
+        None
     }
 
     /// Encua la primera passada (shallow) a la cua de workers.

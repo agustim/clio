@@ -77,6 +77,18 @@ pub struct Feed {
     /// Últim intent de col·lecta (None = mai; venç immediatament).
     pub last_run: Option<DateTime<Utc>>,
     pub enabled: bool,
+    /// Si un link d'aquesta font falla el pipeline, s'esborra automàticament
+    /// en comptes de quedar en 'failed' (i tornar a col·lectar-se).
+    pub delete_on_fail: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Patró de la blocklist: URLs que fan match (regex) no s'accepten mai.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockRule {
+    pub id: Uuid,
+    pub pattern: String,
+    pub note: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
