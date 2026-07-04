@@ -7,6 +7,7 @@
 use crate::service::AppState;
 use serde_json::{json, Value};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Emissor d'avisos d'admin a un chat fix de Telegram. Es comparteix dins
 /// d'AppState perquè qualsevol part (cua, pipeline) pugui notificar.
@@ -30,7 +31,18 @@ impl Notifier {
 
     /// Envia un avís (best-effort: els errors només es registren).
     pub async fn send(&self, text: &str) {
-        send_message(&self.http, &self.base, self.chat_id, text).await;
+        send_message(&self.http, &self.base, self.chat_id, text, None).await;
+    }
+
+    /// Avís d'error amb botons d'acció (esborrar / reintentar el link).
+    pub async fn send_error(&self, text: &str, link_id: Uuid) {
+        let markup = json!({
+            "inline_keyboard": [[
+                { "text": "🗑 Esborra", "callback_data": format!("del:{link_id}") },
+                { "text": "🔁 Reintenta", "callback_data": format!("retry:{link_id}") },
+            ]]
+        });
+        send_message(&self.http, &self.base, self.chat_id, text, Some(markup)).await;
     }
 }
 
@@ -86,7 +98,11 @@ pub async fn run(state: AppState) {
             if let Some(id) = up["update_id"].as_i64() {
                 offset = offset.max(id + 1);
             }
-            handle_update(&state, &http, &base, &up).await;
+            if up.get("callback_query").is_some() {
+                handle_callback(&state, &http, &base, &up["callback_query"]).await;
+            } else {
+                handle_update(&state, &http, &base, &up).await;
+            }
         }
     }
 }
@@ -139,8 +155,77 @@ async fn handle_update(state: &AppState, http: &reqwest::Client, base: &str, up:
             Err(e) => tracing::warn!(error = %e, url = %raw, "telegram: report_link ha fallat"),
         }
     }
-    send_message(http, base, chat_id, "Processant url.").await;
+    send_message(http, base, chat_id, "Processant url.", None).await;
     tracing::info!(user = %user.username, n = urls.len(), "telegram: links encuats");
+}
+
+/// Gestiona els botons dels avisos d'error (esborra / reintenta). Només accepta
+/// callbacks provinents del chat d'admin configurat.
+async fn handle_callback(state: &AppState, http: &reqwest::Client, base: &str, cb: &Value) {
+    let cb_id = cb["id"].as_str().unwrap_or("");
+    let chat_id = cb["message"]["chat"]["id"].as_i64();
+    let message_id = cb["message"]["message_id"].as_i64();
+
+    if chat_id != state.cfg.admin_chat_id {
+        answer_callback(http, base, cb_id, "No autoritzat.").await;
+        return;
+    }
+
+    let Some((action, id_str)) = cb["data"].as_str().and_then(|d| d.split_once(':')) else {
+        return;
+    };
+    let Ok(link_id) = Uuid::parse_str(id_str) else {
+        return;
+    };
+
+    let note = match action {
+        "del" => match state.db.delete_link(link_id).await {
+            Ok(true) => "🗑 Link esborrat.",
+            Ok(false) => "El link ja no existeix.",
+            Err(e) => {
+                tracing::warn!(error = %e, %link_id, "telegram: esborrar link ha fallat");
+                "Error esborrant el link."
+            }
+        },
+        "retry" => match state.retry_link(link_id).await {
+            Ok(()) => "🔁 Link reencuat.",
+            Err(e) => {
+                tracing::warn!(error = %e, %link_id, "telegram: reintent ha fallat");
+                "Error reencuant el link."
+            }
+        },
+        _ => "Acció desconeguda.",
+    };
+
+    answer_callback(http, base, cb_id, note).await;
+    // Treu els botons i deixa constància de l'acció al missatge original.
+    if let (Some(cid), Some(mid)) = (chat_id, message_id) {
+        let orig = cb["message"]["text"].as_str().unwrap_or("");
+        edit_message(http, base, cid, mid, &format!("{orig}\n\n{note}")).await;
+    }
+}
+
+async fn answer_callback(http: &reqwest::Client, base: &str, cb_id: &str, text: &str) {
+    let r = http
+        .post(format!("{base}/answerCallbackQuery"))
+        .json(&json!({ "callback_query_id": cb_id, "text": text }))
+        .send()
+        .await;
+    if let Err(e) = r {
+        tracing::warn!(error = %e, "telegram: answerCallbackQuery ha fallat");
+    }
+}
+
+async fn edit_message(http: &reqwest::Client, base: &str, chat_id: i64, message_id: i64, text: &str) {
+    // Sense reply_markup: editMessageText elimina el teclat inline.
+    let r = http
+        .post(format!("{base}/editMessageText"))
+        .json(&json!({ "chat_id": chat_id, "message_id": message_id, "text": text }))
+        .send()
+        .await;
+    if let Err(e) = r {
+        tracing::warn!(error = %e, "telegram: editMessageText ha fallat");
+    }
 }
 
 /// Extreu les URLs http(s) del text (tokens separats per espais).
@@ -151,10 +236,20 @@ fn extract_urls(text: &str) -> Vec<String> {
         .collect()
 }
 
-async fn send_message(http: &reqwest::Client, base: &str, chat_id: i64, text: &str) {
+async fn send_message(
+    http: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    text: &str,
+    reply_markup: Option<Value>,
+) {
+    let mut payload = json!({ "chat_id": chat_id, "text": text });
+    if let Some(markup) = reply_markup {
+        payload["reply_markup"] = markup;
+    }
     let r = http
         .post(format!("{base}/sendMessage"))
-        .json(&json!({ "chat_id": chat_id, "text": text }))
+        .json(&payload)
         .send()
         .await;
     if let Err(e) = r {

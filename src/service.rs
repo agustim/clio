@@ -105,6 +105,20 @@ impl AppState {
         }
     }
 
+    /// Avís d'error amb botons per esborrar o reintentar el link.
+    pub async fn notify_error(&self, text: &str, link_id: Uuid) {
+        if let Some(n) = &self.notifier {
+            n.send_error(text, link_id).await;
+        }
+    }
+
+    /// Reencua un link: torna l'estat a Pending i el posa a la cua shallow.
+    pub async fn retry_link(&self, link_id: Uuid) -> Result<()> {
+        self.db.set_link_status(link_id, LinkStatus::Pending).await?;
+        self.enqueue(link_id);
+        Ok(())
+    }
+
     /// Re-encua tota la feina pendent de la DB (recovery en arrencar).
     pub async fn recover(&self) -> Result<()> {
         let shallow = self.db.pending_shallow_ids().await?;

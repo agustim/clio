@@ -75,7 +75,7 @@ async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) 
         Ok(Some(l)) => l.url,
         _ => link_id.to_string(),
     };
-    state.notify(&format!("⚠️ {what} fallida\n{url}\n{err}")).await;
+    state.notify_error(&format!("⚠️ {what} fallida\n{url}\n{err}"), link_id).await;
 }
 
 async fn handle(state: &AppState, job: Job) {
