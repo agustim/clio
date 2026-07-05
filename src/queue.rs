@@ -66,6 +66,10 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
     }
 }
 
+/// Fallades consecutives d'una mateixa URL (font `delete_on_fail`) abans que
+/// entri automàticament a la blocklist i deixi de col·lectar-se.
+const NUM_ERRORS_TO_BLACKLIST: i64 = 5;
+
 /// Gestiona una feina fallida. Si el link ve d'una font amb `delete_on_fail`,
 /// l'esborra automàticament (i avisa sense botons). Si no, avisa amb botons
 /// perquè l'admin decideixi (esborrar / reintentar).
@@ -82,6 +86,24 @@ async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) 
                 Ok(_) => tracing::info!(%link_id, %url, "auto-esborrat (font delete_on_fail)"),
                 Err(e) => tracing::warn!(error = %e, %link_id, "auto-esborrat fallit"),
             }
+            // La font torna a col·lectar la mateixa URL: comptem fallades
+            // consecutives (el comptador sobreviu l'esborrat). En arribar al
+            // llindar, blocklist automàtica perquè deixi d'acceptar-se.
+            match state.db.bump_url_fail_count(&url).await {
+                Ok(n) if n >= NUM_ERRORS_TO_BLACKLIST => {
+                    auto_blocklist(state, &url, what, n).await;
+                    return;
+                }
+                Ok(n) => {
+                    state
+                        .notify(&format!(
+                            "🗑 {what} fallida — link esborrat (font auto, {n}/{NUM_ERRORS_TO_BLACKLIST})\n{url}\n{err}"
+                        ))
+                        .await;
+                    return;
+                }
+                Err(e) => tracing::warn!(error = %e, %url, "bump fail count fallit"),
+            }
             state
                 .notify(&format!("🗑 {what} fallida — link esborrat (font auto)\n{url}\n{err}"))
                 .await;
@@ -92,6 +114,26 @@ async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) 
     }
 
     state.notify_error(&format!("⚠️ {what} fallida\n{url}\n{err}"), link_id).await;
+}
+
+/// Afegeix la URL (exacta) a la blocklist després de massa fallades seguides.
+async fn auto_blocklist(state: &AppState, url: &str, what: &str, n: i64) {
+    let pattern = format!("^{}$", regex::escape(url));
+    let note = format!("auto: {n} fallades seguides");
+    match state.db.add_block(&pattern, Some(&note)).await {
+        Ok(_) => tracing::info!(%url, n, "auto-blocklist (massa fallades)"),
+        // Un patró duplicat (ja bloquejat) no és un error real.
+        Err(e) => tracing::warn!(error = %e, %pattern, "auto-blocklist: add_block (potser duplicat)"),
+    }
+    // Ja no cal el comptador un cop bloquejada.
+    if let Err(e) = state.db.clear_url_fail_count(url).await {
+        tracing::warn!(error = %e, %url, "clear fail count fallit");
+    }
+    state
+        .notify(&format!(
+            "⛔️ {what} fallida {n} cops seguits — URL afegida a la blocklist\n{url}"
+        ))
+        .await;
 }
 
 async fn handle(state: &AppState, job: Job) {

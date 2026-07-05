@@ -65,6 +65,7 @@ impl Db {
             ("005_social", include_str!("../migrations/005_social.sql")),
             ("006_feeds", include_str!("../migrations/006_feeds.sql")),
             ("007_blocklist", include_str!("../migrations/007_blocklist.sql")),
+            ("008_fail_counts", include_str!("../migrations/008_fail_counts.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -339,6 +340,32 @@ impl Db {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("pattern")).collect())
+    }
+
+    /// Incrementa el comptador de fallades consecutives d'una URL i retorna el
+    /// nou valor. La fila sobreviu l'esborrat del link (font `delete_on_fail`).
+    pub async fn bump_url_fail_count(&self, url: &str) -> Result<i64> {
+        let count: i64 = sqlx::query(
+            "INSERT INTO link_fail_counts (url, count, updated_at) VALUES (?, 1, ?) \
+             ON CONFLICT(url) DO UPDATE SET count = count + 1, updated_at = excluded.updated_at \
+             RETURNING count",
+        )
+        .bind(url)
+        .bind(now_str())
+        .fetch_one(&self.pool)
+        .await?
+        .get("count");
+        Ok(count)
+    }
+
+    /// Esborra el comptador de fallades d'una URL (p.ex. en bloquejar-la o en
+    /// processar-la amb èxit).
+    pub async fn clear_url_fail_count(&self, url: &str) -> Result<()> {
+        sqlx::query("DELETE FROM link_fail_counts WHERE url = ?")
+            .bind(url)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn list_feeds(&self) -> Result<Vec<Feed>> {
