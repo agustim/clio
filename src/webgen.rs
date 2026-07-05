@@ -140,7 +140,6 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clio · LinkAnalyzer</title>
   <meta name="description" content="Enllaços recollits, analitzats i resumits per Clio.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%230d1117'/%3E%3Ctext x='50' y='50' font-size='60' text-anchor='middle' dominant-baseline='central' fill='%2358a6ff'%3E%E2%97%86%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -153,18 +152,27 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <p class="tagline">Enllaços analitzats &amp; resumits</p>
         </div>
       </div>
-      <div class="topbar-actions">
-        <button id="add-btn" class="theme-toggle" aria-label="Afegeix enllaç" title="Afegeix un nou enllaç" style="display:none">➕</button>
-        <button id="admin-btn" class="theme-toggle" aria-label="Usuaris" title="Gestió d'usuaris" style="display:none">👤</button>
-        <button id="token-btn" class="theme-toggle" aria-label="Sessió" title="Introdueix el teu API token">🔑</button>
-        <button id="theme-toggle" class="theme-toggle" aria-label="Canvia el tema" title="Canvia el tema">
-          <span class="theme-icon"></span>
-        </button>
-        <button id="cols-dec" class="theme-toggle cols-btn" aria-label="Menys columnes" title="Menys columnes">−</button>
-        <button id="cols-inc" class="theme-toggle cols-btn" aria-label="Més columnes" title="Més columnes">+</button>
+      <div class="menu-wrap">
+        <button id="menu-btn" class="theme-toggle" aria-label="Menú" title="Menú" aria-haspopup="true" aria-expanded="false">☰</button>
+        <div id="menu" class="menu" role="menu" hidden>
+          <button class="menu-item" data-act="search" role="menuitem"><span class="mi-check"></span> Mostra el cercador</button>
+          <button class="menu-item" data-act="tags" role="menuitem"><span class="mi-check"></span> Mostra els tags</button>
+          <button class="menu-item" data-act="new" role="menuitem"><span class="mi-check"></span> Mostra novetats</button>
+          <button class="menu-item" data-act="new-dec" role="menuitem"><span class="mi-ico">◀</span> Novetats: un dia abans</button>
+          <button class="menu-item" data-act="new-inc" role="menuitem"><span class="mi-ico">▶</span> Novetats: un dia després</button>
+          <div class="menu-sep"></div>
+          <button class="menu-item" data-act="cols-dec" role="menuitem"><span class="mi-ico">−</span> Menys columnes</button>
+          <button class="menu-item" data-act="cols-inc" role="menuitem"><span class="mi-ico">+</span> Més columnes</button>
+          <div class="menu-sep"></div>
+          <button class="menu-item" data-act="theme" role="menuitem"><span class="mi-ico theme-icon"></span> Canvia el tema</button>
+          <div class="menu-sep" id="menu-api-sep" hidden></div>
+          <button class="menu-item" id="mi-token" data-act="token" role="menuitem" hidden>🔑 Sessió</button>
+          <button class="menu-item" id="mi-admin" data-act="admin" role="menuitem" hidden>👤 Usuaris</button>
+          <button class="menu-item" id="mi-add" data-act="add" role="menuitem" hidden>➕ Afegeix enllaç</button>
+        </div>
       </div>
     </div>
-    <div class="topbar-inner controls">
+    <div id="controls" class="topbar-inner controls">
       <div class="search-wrap">
         <svg class="search-ico" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M21 20l-5.6-5.6a7 7 0 10-1.4 1.4L20 21zM5 10a5 5 0 1110 0 5 5 0 01-10 0z"/></svg>
         <input id="search" type="search" placeholder="Cerca per títol o resum…" autocomplete="off">
@@ -277,6 +285,32 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .tags-toggle { cursor: pointer; user-select: none; transition: color var(--transition); }
 .tags-toggle:hover { color: var(--fg); }
 .tags-toggle.on, .tags-toggle.on b { color: var(--accent); }
+
+/* ---- Menú (☰) ---- */
+.menu-wrap { position: relative; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + .45rem); min-width: 244px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: .35rem; z-index: 60;
+  display: flex; flex-direction: column; gap: .05rem;
+}
+.menu[hidden] { display: none; }
+.menu-item {
+  display: flex; align-items: center; gap: .55rem; width: 100%; text-align: left;
+  cursor: pointer; font-size: .86rem; padding: .5rem .55rem; border-radius: 8px;
+  border: 1px solid transparent; background: none; color: var(--fg);
+  transition: background var(--transition), color var(--transition);
+}
+.menu-item:hover { background: var(--card-hover); }
+.menu-item[hidden] { display: none; }
+.menu-item.on { color: var(--accent); }
+.menu-item .mi-check, .menu-item .mi-ico {
+  flex: none; width: 1.1em; text-align: center; color: var(--muted);
+}
+.menu-item.on .mi-check { color: var(--accent); }
+.menu-item.on .mi-check::before { content: "✓"; }
+.menu-sep { height: 1px; background: var(--border); margin: .28rem .35rem; }
+.menu-sep[hidden] { display: none; }
 
 /* ---- Chips ---- */
 .chip {
@@ -475,7 +509,7 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .footer { text-align: center; color: var(--muted); padding: 2rem; font-size: .82rem; border-top: 1px solid var(--border); }
 
 @media (max-width: 560px) {
-  .grid { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: minmax(0, 1fr); }
   .tagline { display: none; }
 }
 "#;
@@ -489,6 +523,11 @@ let activeTag = null;   // filtre per tag (#tag:xxx)
 let activeUser = null;  // filtre per reporter (#at:xxx)
 let onlyNew = false;    // mostra només novetats (links no vistos)
 let filtersOpen = false; // llistat de tags general plegat per defecte
+
+// ---- Cerca: amagada per defecte, l'estat es recorda a cookie ----
+function readSearchOpen() { return /(?:^|;\s*)clio_search=1/.test(document.cookie); }
+function writeSearchOpen(v) { document.cookie = 'clio_search=' + (v ? 1 : 0) + '; path=/; max-age=31536000; SameSite=Lax'; }
+let searchOpen = readSearchOpen();
 
 const $ = (id) => document.getElementById(id);
 
@@ -504,7 +543,13 @@ function writeLastVisit(ms) {
 }
 const LAST_VISIT = readLastVisit();
 function linkTime(l) { const t = Date.parse(l.created_at); return isNaN(t) ? 0 : t; }
-function isNew(l) { return LAST_VISIT > 0 && linkTime(l) > LAST_VISIT; }
+// Desplaçament del llindar de novetats en dies (persistit). Negatiu = enrere
+// (mostra'n més, també les més antigues); positiu = endavant (mostra'n menys).
+function readNewOffset() { const m = document.cookie.match(/(?:^|;\s*)clio_newoff=(-?\d+)/); return m ? parseInt(m[1], 10) : 0; }
+function writeNewOffset(n) { document.cookie = 'clio_newoff=' + n + '; path=/; max-age=31536000; SameSite=Lax'; }
+let NEW_OFFSET = readNewOffset();
+function newSince() { return LAST_VISIT + NEW_OFFSET * 86400000; }
+function isNew(l) { return LAST_VISIT > 0 && linkTime(l) > newSince(); }
 
 // ---- Sessió / API ----
 // Les accions (clau, refer, baixa, usuaris) només tenen sentit contra un
@@ -582,30 +627,31 @@ async function blockLink(id) {
   } catch (e) { toast('Error en bloquejar: ' + e.message, 'err'); }
 }
 
-function initTokenButton() {
-  const btn = $('token-btn');
-  if (!btn) return;
-  if (!API_LIVE) { btn.style.display = 'none'; return; }
-  const refresh = () => { btn.classList.toggle('on', !!getToken()); btn.title = getToken() ? 'Sessió activa · clica per canviar/treure el token' : 'Introdueix el teu API token'; };
-  refresh();
-  btn.onclick = async () => {
-    const cur = getToken();
-    const t = prompt(cur ? 'API token (buit per tancar sessió):' : 'Enganxa el teu API token:', cur);
-    if (t === null) return;
-    setToken(t.trim());
-    await loadMe();
-    refresh(); refreshAdminBtn(); refreshAddBtn(); render();
-    toast(getToken() ? 'Sessió iniciada.' : 'Sessió tancada.', 'ok');
-  };
+// Actualitza la visibilitat i l'estat dels ítems del menú lligats a l'API
+// (només tenen sentit contra un servei viu). S'invoca en canviar de sessió.
+function refreshApiItems() {
+  const tk = $('mi-token'), ad = $('mi-admin'), af = $('mi-add'), sep = $('menu-api-sep');
+  if (!tk) return;
+  tk.hidden = !API_LIVE;
+  tk.classList.toggle('on', !!getToken());
+  tk.textContent = getToken() ? '🔑 Sessió activa (tanca / canvia)' : '🔑 Inicia sessió amb token';
+  if (ad) ad.hidden = !isAdmin();
+  if (af) af.hidden = !hasToken();
+  if (sep) sep.hidden = !API_LIVE;
+}
+
+async function promptToken() {
+  if (!API_LIVE) { toast('Aquesta web no té servei API actiu.', 'err'); return; }
+  const cur = getToken();
+  const t = prompt(cur ? 'API token (buit per tancar sessió):' : 'Enganxa el teu API token:', cur);
+  if (t === null) return;
+  setToken(t.trim());
+  await loadMe();
+  refreshApiItems(); render();
+  toast(getToken() ? 'Sessió iniciada.' : 'Sessió tancada.', 'ok');
 }
 
 // ---- Afegir enllaç (qualsevol usuari amb token) ----
-function refreshAddBtn() {
-  const b = $('add-btn');
-  if (!b) return;
-  b.style.display = hasToken() ? '' : 'none';
-  b.onclick = addLink;
-}
 
 async function addLink() {
   if (!hasToken()) { toast('Cal iniciar sessió amb un token.', 'err'); return; }
@@ -630,13 +676,6 @@ async function addLink() {
 }
 
 // ---- Admin: gestió d'usuaris ----
-function refreshAdminBtn() {
-  const b = $('admin-btn');
-  if (!b) return;
-  b.style.display = isAdmin() ? '' : 'none';
-  b.onclick = openUsersModal;
-}
-
 // Mostra un token un sol cop (és copiable des del prompt).
 function showToken(username, token) {
   prompt("Token de " + username + " (copia'l ara, no es tornarà a mostrar):", token);
@@ -693,7 +732,7 @@ async function openUsersModal() {
           <button class="act act-delete" data-act="del" title="Esborra"${mine?' disabled':''}>🗑</button>
         </td>`;
       tr.querySelector('[data-act=role]').onclick = async () => {
-        try { await api('PATCH', '/users/' + u.id, { admin: u.role !== 'admin' }); toast('Rol actualitzat.', 'ok'); refresh(); if (mine) { await loadMe(); refreshAdminBtn(); } }
+        try { await api('PATCH', '/users/' + u.id, { admin: u.role !== 'admin' }); toast('Rol actualitzat.', 'ok'); refresh(); if (mine) { await loadMe(); refreshApiItems(); } }
         catch (e) { toast(e.message, 'err'); }
       };
       tr.querySelector('[data-act=rename]').onclick = async () => {
@@ -860,11 +899,11 @@ function initTheme() {
   const sysDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const theme = saved || (sysDark ? 'dark' : 'light');
   document.documentElement.setAttribute('data-theme', theme);
-  $('theme-toggle').addEventListener('click', () => {
-    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('clio-theme', next);
-  });
+}
+function toggleTheme() {
+  const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('clio-theme', next);
 }
 
 // ---- Nombre de columnes de la graella (desat a cookie) ----
@@ -888,15 +927,9 @@ function curCols() {
   const cs = getComputedStyle($('grid')).gridTemplateColumns;
   return cs && cs !== 'none' ? cs.split(' ').length : 1;
 }
-function initCols() {
-  applyCols();
-  $('cols-inc').addEventListener('click', () => {
-    writeCols(Math.min(curCols() + 1, 8)); applyCols();
-  });
-  $('cols-dec').addEventListener('click', () => {
-    writeCols(Math.max(curCols() - 1, 1)); applyCols();
-  });
-}
+function colsInc() { writeCols(Math.min(curCols() + 1, 8)); applyCols(); }
+function colsDec() { writeCols(Math.max(curCols() - 1, 1)); applyCols(); }
+function initCols() { applyCols(); }
 
 function buildFilters() {
   const counts = {};
@@ -1119,9 +1152,62 @@ function renderStats() {
   }
   $('stats').innerHTML = html;
   const tt = $('tags-toggle');
-  if (tt) tt.onclick = () => { filtersOpen = !filtersOpen; renderStats(); buildFilters(); };
+  if (tt) tt.onclick = () => { filtersOpen = !filtersOpen; renderStats(); buildFilters(); updateMenuState(); };
   const nt = $('new-toggle');
-  if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); };
+  if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); };
+}
+
+// ---- Menú (☰): cercador, tags, novetats, columnes, tema, accions API ----
+function applySearch() { const c = $('controls'); if (c) c.style.display = searchOpen ? '' : 'none'; }
+
+function shiftNew(days) {
+  NEW_OFFSET += days;
+  writeNewOffset(NEW_OFFSET);
+  renderStats(); render();
+  const label = NEW_OFFSET === 0 ? "a l'última visita"
+    : (NEW_OFFSET > 0 ? '+' : '') + NEW_OFFSET + (Math.abs(NEW_OFFSET) === 1 ? ' dia' : ' dies') + ' respecte l’última visita';
+  toast('Llindar de novetats: ' + label + '.', 'ok');
+}
+
+function updateMenuState() {
+  const set = (act, on) => { const el = document.querySelector('.menu-item[data-act="' + act + '"]'); if (el) el.classList.toggle('on', !!on); };
+  set('search', searchOpen); set('tags', filtersOpen); set('new', onlyNew);
+}
+
+function menuAction(act) {
+  switch (act) {
+    case 'search': searchOpen = !searchOpen; writeSearchOpen(searchOpen); applySearch(); updateMenuState(); break;
+    case 'tags': filtersOpen = !filtersOpen; renderStats(); buildFilters(); updateMenuState(); break;
+    case 'new': onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); break;
+    case 'new-dec': shiftNew(-1); break;
+    case 'new-inc': shiftNew(1); break;
+    case 'cols-dec': colsDec(); break;
+    case 'cols-inc': colsInc(); break;
+    case 'theme': toggleTheme(); break;
+    case 'token': promptToken(); break;
+    case 'admin': openUsersModal(); break;
+    case 'add': addLink(); break;
+  }
+}
+
+function initMenu() {
+  const btn = $('menu-btn'), menu = $('menu');
+  if (!btn || !menu) return;
+  const close = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  const open = () => { menu.hidden = false; btn.setAttribute('aria-expanded', 'true'); updateMenuState(); };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden ? open() : close(); });
+  menu.addEventListener('click', (e) => {
+    const it = e.target.closest('.menu-item'); if (!it) return;
+    const act = it.dataset.act;
+    // Les accions que obren un prompt/modal tanquen el menú; els toggles el deixen obert.
+    if (act === 'token' || act === 'admin' || act === 'add') close();
+    menuAction(act);
+  });
+  document.addEventListener('click', (e) => { if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  applySearch();
+  refreshApiItems();
+  updateMenuState();
 }
 
 async function maybeFetch() {
@@ -1134,9 +1220,7 @@ async function maybeFetch() {
   initCols();
   await probeApi();
   await loadMe();
-  initTokenButton();
-  refreshAdminBtn();
-  refreshAddBtn();
+  initMenu();
   await maybeFetch();
   applyHash();
   renderStats();
