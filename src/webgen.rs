@@ -48,12 +48,26 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
         dir.join("data/links.js"),
         format!("window.__LINKS__ = {json};\n"),
     )?;
+
+    // GitHub Pages ignora _headers (sintaxi de Cloudflare/Netlify) i serveix les
+    // dades amb la seva pròpia cache-control (~10 min). Com que les dades canvien
+    // entre releases, no podem confiar en {{VERSION}}: injectem un segell de
+    // generació {{DATAV}} als URL de dades (?v=) perquè el navegador sempre les
+    // recarregui després d'un refresc. .nojekyll evita el build de Jekyll a Pages.
+    let datav = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string();
+    std::fs::write(dir.join(".nojekyll"), "")?;
     std::fs::write(
         dir.join("index.html"),
-        INDEX_HTML.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
+        INDEX_HTML
+            .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+            .replace("{{DATAV}}", &datav),
     )?;
     std::fs::write(dir.join("css/style.css"), STYLE_CSS)?;
-    std::fs::write(dir.join("js/app.js"), APP_JS)?;
+    std::fs::write(dir.join("js/app.js"), APP_JS.replace("{{DATAV}}", &datav))?;
 
     tracing::info!(count = links.len(), dir = %cfg.public_dir, "static web generated");
     Ok(())
@@ -144,7 +158,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <title>Clio · LinkAnalyzer</title>
   <meta name="description" content="Enllaços recollits, analitzats i resumits per Clio.">
   <meta name="app-version" content="{{VERSION}}">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v={{VERSION}}">
 </head>
 <body>
   <header class="topbar">
@@ -206,8 +220,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </header>
   <main id="grid" class="grid"></main>
   <footer class="footer"><p>Generat per <strong>Clio</strong> · LinkAnalyzer</p></footer>
-  <script src="data/links.js"></script>
-  <script src="js/app.js"></script>
+  <script src="data/links.js?v={{DATAV}}"></script>
+  <script src="js/app.js?v={{VERSION}}"></script>
 </body>
 </html>
 "#;
@@ -1035,7 +1049,7 @@ async function loadDeep(box) {
   let text = DEEP_CACHE.get(id);
   if (text === undefined) {
     try {
-      const r = await fetch('data/deep/' + id + '.json');
+      const r = await fetch('data/deep/' + id + '.json?v={{DATAV}}');
       text = r.ok ? ((await r.json()).deep_summary || '') : '';
     } catch (e) { text = ''; }
     DEEP_CACHE.set(id, text);
@@ -1281,7 +1295,7 @@ function initMenu() {
 
 async function maybeFetch() {
   if (ALL.length || location.protocol === 'file:') return;
-  try { const r = await fetch('data/links.json'); if (r.ok) ALL = await r.json(); } catch (e) {}
+  try { const r = await fetch('data/links.json?v={{DATAV}}'); if (r.ok) ALL = await r.json(); } catch (e) {}
 }
 
 (async function init() {
