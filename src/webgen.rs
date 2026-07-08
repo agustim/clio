@@ -48,7 +48,10 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
         dir.join("data/links.js"),
         format!("window.__LINKS__ = {json};\n"),
     )?;
-    std::fs::write(dir.join("index.html"), INDEX_HTML)?;
+    std::fs::write(
+        dir.join("index.html"),
+        INDEX_HTML.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
+    )?;
     std::fs::write(dir.join("css/style.css"), STYLE_CSS)?;
     std::fs::write(dir.join("js/app.js"), APP_JS)?;
 
@@ -140,6 +143,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clio · LinkAnalyzer</title>
   <meta name="description" content="Enllaços recollits, analitzats i resumits per Clio.">
+  <meta name="app-version" content="{{VERSION}}">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -165,6 +169,8 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <button class="menu-item" data-act="cols-inc" role="menuitem"><span class="mi-ico">+</span> Més columnes</button>
           <div class="menu-sep"></div>
           <button class="menu-item" data-act="theme" role="menuitem"><span class="mi-ico theme-icon"></span> Canvia el tema</button>
+          <div class="menu-sep"></div>
+          <button class="menu-item" data-act="about" role="menuitem"><span class="mi-ico">❓</span> Què és això?</button>
           <div class="menu-sep" id="menu-api-sep" hidden></div>
           <button class="menu-item" id="mi-token" data-act="token" role="menuitem" hidden>🔑 Sessió</button>
           <button class="menu-item" id="mi-admin" data-act="admin" role="menuitem" hidden>👤 Usuaris</button>
@@ -468,6 +474,8 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .modal-x { cursor: pointer; background: none; border: none; color: var(--muted); font-size: 1.1rem; }
 .modal-x:hover { color: var(--fg); }
 .modal-body { padding: 1.1rem; }
+.modal-body p { line-height: 1.55; margin: 0 0 .7rem; }
+.about-ver { color: var(--faint); font-size: .85rem; margin-bottom: 0 !important; }
 .utable { width: 100%; border-collapse: collapse; font-size: .88rem; }
 .utable th { text-align: left; color: var(--faint); font-weight: 500; font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; padding: .3rem .4rem; }
 .utable td { padding: .45rem .4rem; border-top: 1px solid var(--border); vertical-align: middle; }
@@ -1225,7 +1233,30 @@ function menuAction(act) {
     case 'token': promptToken(); break;
     case 'admin': openUsersModal(); break;
     case 'add': addLink(); break;
+    case 'about': openAboutModal(); break;
   }
+}
+
+function openAboutModal() {
+  const meta = document.querySelector('meta[name="app-version"]');
+  const ver = meta ? meta.getAttribute('content') : '';
+  const ov = document.createElement('div');
+  ov.className = 'modal-ov';
+  ov.innerHTML = `<div class="modal">
+    <div class="modal-head"><h3>❓ Què és això?</h3><button class="modal-x" title="Tanca">✕</button></div>
+    <div class="modal-body">
+      <p><strong>Clio</strong> és un LinkAnalyzer: recull enllaços, els analitza i en genera
+      resums, tipus i sentiment amb IA. Aquesta web mostra tot el que ha recollit,
+      amb cerca, filtres i tags per navegar-hi.</p>
+      <p class="about-ver">Versió <strong>${esc(ver)}</strong></p>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => { ov.remove(); document.removeEventListener('keydown', esc2); };
+  function esc2(e){ if(e.key==='Escape') close(); }
+  ov.querySelector('.modal-x').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  document.addEventListener('keydown', esc2);
 }
 
 function initMenu() {
