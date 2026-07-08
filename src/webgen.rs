@@ -508,19 +508,34 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 
 .footer { text-align: center; color: var(--muted); padding: 2rem; font-size: .82rem; border-top: 1px solid var(--border); }
 
+/* Enllaç permanent per card (#id:xxx): icona discreta a la fila de tipus. */
+.permalink { flex: none; text-decoration: none; font-size: .82rem; line-height: 1; opacity: .45; transition: opacity var(--transition); }
+.permalink:hover { opacity: 1; }
+
+/* Vista permalink: una sola card centrada, sense filtres ni estadístiques. */
+body.single-view #controls,
+body.single-view #stats,
+body.single-view #perso,
+body.single-view #filters { display: none; }
+body.single-view .grid { display: block; max-width: 640px; margin: 0 auto; }
+.home-link { text-align: center; padding: 2rem 1rem 1rem; }
+.home-link a { color: var(--accent); text-decoration: none; font-size: .9rem; }
+.home-link a:hover { text-decoration: underline; }
+
 @media (max-width: 560px) {
   .grid { grid-template-columns: minmax(0, 1fr); }
   .tagline { display: none; }
 }
 "#;
 
-const APP_JS: &str = r#""use strict";
+const APP_JS: &str = r##""use strict";
 
 // Dades: incrustades a data/links.js (window.__LINKS__) per funcionar via file://.
 // Fallback a fetch si s'està servint per HTTP i no hi ha incrustat.
 let ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
 let activeTag = null;   // filtre per tag (#tag:xxx)
 let activeUser = null;  // filtre per reporter (#at:xxx)
+let activeId = null;    // permalink: mostra només una card (#id:xxx)
 let onlyNew = false;    // mostra només novetats (links no vistos)
 let filtersOpen = false; // llistat de tags general plegat per defecte
 
@@ -883,9 +898,10 @@ function md(src) {
 // ---- Enrutament per hash: #tag:xxx o #at:usuari ----
 function applyHash() {
   const h = decodeURIComponent((location.hash || '').replace(/^#/, '')).trim();
-  activeTag = null; activeUser = null;
+  activeTag = null; activeUser = null; activeId = null;
   if (h.toLowerCase().startsWith('tag:')) activeTag = h.slice(4).toLowerCase();
   else if (h.toLowerCase().startsWith('at:')) activeUser = h.slice(3).toLowerCase();
+  else if (h.toLowerCase().startsWith('id:')) activeId = h.slice(3);
 }
 function setHash(h) {
   if (location.hash.replace(/^#/, '') === h) { onHashChange(); }
@@ -1026,6 +1042,10 @@ function render() {
   const grid = $('grid');
   grid.innerHTML = '';
 
+  // Vista permalink (#id:xxx): només una card, sense filtres ni estadístiques.
+  document.body.classList.toggle('single-view', !!activeId);
+  if (activeId) { renderSingle(grid); return; }
+
   const items = ALL.filter(l => {
     if (activeTag && !(l.tags||[]).includes(activeTag)) return false;
     if (activeUser && !(l.reporters||[]).some(u => u.toLowerCase() === activeUser)) return false;
@@ -1048,7 +1068,25 @@ function render() {
   }
   renderPerso();
 
-  items.forEach(l => {
+  items.forEach(l => { grid.appendChild(buildCard(l)); });
+
+  if (!items.length) grid.innerHTML = '<div class="empty">Cap resultat amb aquests filtres.</div>';
+}
+
+// Vista d'una sola card via permalink (#id:xxx). Afegeix un enllaç a l'inici.
+function renderSingle(grid) {
+  const l = ALL.find(x => x.id === activeId);
+  if (l) grid.appendChild(buildCard(l));
+  else grid.innerHTML = '<div class="empty">Aquest enllaç no existeix o s\'ha donat de baixa.</div>';
+  const home = document.createElement('div');
+  home.className = 'home-link';
+  home.innerHTML = '<a href="#">← Torna a tots els enllaços</a>';
+  home.querySelector('a').onclick = (e) => { e.preventDefault(); setHash(''); };
+  grid.appendChild(home);
+}
+
+// Construeix l'element <article> d'una card. Reutilitzat per la graella i el permalink.
+function buildCard(l) {
     const reps = l.reporters || [];
     const type = esc(l.link_type || 'other');
     const sent = esc(l.sentiment || 'neutral');
@@ -1066,6 +1104,7 @@ function render() {
         <div class="card-row2-left">
           ${isNew(l) ? '<span class="badge-new" title="Nou des de la teva última visita">NOU</span>' : ''}
           <span class="badge t-${type}">${type}</span>
+          <a class="permalink" href="#id:${esc(l.id)}" title="Enllaç permanent a aquesta card" aria-label="Enllaç permanent">🔗</a>
           ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
         </div>
         <div class="card-tabs">
@@ -1117,10 +1156,9 @@ function render() {
     if (dl) dl.onclick = () => deleteLink(l.id);
     const bl = card.querySelector('.act-block');
     if (bl) bl.onclick = () => blockLink(l.id);
-    grid.appendChild(card);
-  });
-
-  if (!items.length) grid.innerHTML = '<div class="empty">Cap resultat amb aquests filtres.</div>';
+    const pl = card.querySelector('.permalink');
+    if (pl) pl.onclick = (e) => { e.preventDefault(); setHash('id:' + l.id); };
+    return card;
 }
 
 // Banner d'estat de la personalització + botó de neteja.
@@ -1233,4 +1271,4 @@ async function maybeFetch() {
   // Marca aquesta visita: els links nous deixaran de ser-ho a la pròxima.
   writeLastVisit(Date.now());
 })();
-"#;
+"##;
