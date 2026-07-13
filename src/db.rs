@@ -278,6 +278,18 @@ impl Db {
         Ok(res.rows_affected())
     }
 
+    /// Cert si el link té algun reporter NPC (usuari col·lector automàtic).
+    pub async fn link_from_npc(&self, link_id: Uuid) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM reports r JOIN users u ON u.id = r.user_id \
+             WHERE r.link_id = ? AND u.role = 'npc' LIMIT 1",
+        )
+        .bind(link_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// Cert si el link té algun reporter que és NPC d'un feed amb
     /// `delete_on_fail` actiu (=> en fallar, s'ha d'esborrar automàticament).
     pub async fn link_from_delete_on_fail_source(&self, link_id: Uuid) -> Result<bool> {

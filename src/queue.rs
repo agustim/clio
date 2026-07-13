@@ -70,54 +70,47 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
 /// entri automàticament a la blocklist i deixi de col·lectar-se.
 const NUM_ERRORS_TO_BLACKLIST: i64 = 5;
 
-/// Gestiona una feina fallida. Si el link ve d'una font amb `delete_on_fail`,
-/// l'esborra automàticament (i avisa sense botons). Si no, avisa amb botons
-/// perquè l'admin decideixi (esborrar / reintentar).
+/// Gestiona una feina fallida. Els links reportats per un NPC no molesten
+/// mai l'admin: es compten fallades consecutives (amb auto-esborrat si la
+/// font és `delete_on_fail`) i, en arribar al llindar, la URL entra a la
+/// blocklist. Els links humans avisen amb botons perquè l'admin decideixi
+/// (esborrar / reintentar).
 async fn notify_failure(state: &AppState, link_id: Uuid, what: &str, err: &str) {
     let url = match state.db.link_by_id(link_id).await {
         Ok(Some(l)) => l.url,
         _ => link_id.to_string(),
     };
 
-    // Auto-esborrat: fonts marcades com a delete_on_fail no s'acumulen en 'failed'.
-    match state.db.link_from_delete_on_fail_source(link_id).await {
+    match state.db.link_from_npc(link_id).await {
         Ok(true) => {
-            match state.db.delete_link(link_id).await {
-                Ok(_) => tracing::info!(%link_id, %url, "auto-esborrat (font delete_on_fail)"),
-                Err(e) => tracing::warn!(error = %e, %link_id, "auto-esborrat fallit"),
+            // Auto-esborrat: fonts marcades com a delete_on_fail no s'acumulen en 'failed'.
+            match state.db.link_from_delete_on_fail_source(link_id).await {
+                Ok(true) => match state.db.delete_link(link_id).await {
+                    Ok(_) => tracing::info!(%link_id, %url, "auto-esborrat (font delete_on_fail)"),
+                    Err(e) => tracing::warn!(error = %e, %link_id, "auto-esborrat fallit"),
+                },
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, %link_id, "consulta delete_on_fail fallida"),
             }
-            // La font torna a col·lectar la mateixa URL: comptem fallades
-            // consecutives (el comptador sobreviu l'esborrat). En arribar al
-            // llindar, blocklist automàtica perquè deixi d'acceptar-se.
+            // Fallades consecutives (el comptador sobreviu l'esborrat). En
+            // arribar al llindar, blocklist automàtica perquè deixi d'acceptar-se.
             match state.db.bump_url_fail_count(&url).await {
-                Ok(n) if n >= NUM_ERRORS_TO_BLACKLIST => {
-                    auto_blocklist(state, &url, what, n).await;
-                    return;
-                }
-                Ok(n) => {
-                    state
-                        .notify(&format!(
-                            "🗑 {what} fallida — link esborrat (font auto, {n}/{NUM_ERRORS_TO_BLACKLIST})\n{url}\n{err}"
-                        ))
-                        .await;
-                    return;
-                }
+                Ok(n) if n >= NUM_ERRORS_TO_BLACKLIST => auto_blocklist(state, &url, n).await,
+                Ok(n) => tracing::info!(%url, n, err, "fallada NPC ({n}/{NUM_ERRORS_TO_BLACKLIST}), sense avís"),
                 Err(e) => tracing::warn!(error = %e, %url, "bump fail count fallit"),
             }
-            state
-                .notify(&format!("🗑 {what} fallida — link esborrat (font auto)\n{url}\n{err}"))
-                .await;
             return;
         }
         Ok(false) => {}
-        Err(e) => tracing::warn!(error = %e, %link_id, "consulta delete_on_fail fallida"),
+        Err(e) => tracing::warn!(error = %e, %link_id, "consulta reporter NPC fallida"),
     }
 
     state.notify_error(&format!("⚠️ {what} fallida\n{url}\n{err}"), link_id).await;
 }
 
 /// Afegeix la URL (exacta) a la blocklist després de massa fallades seguides.
-async fn auto_blocklist(state: &AppState, url: &str, what: &str, n: i64) {
+/// Silenciós de cara a l'admin (només tracing): les fonts NPC no avisen mai.
+async fn auto_blocklist(state: &AppState, url: &str, n: i64) {
     let pattern = format!("^{}$", regex::escape(url));
     let note = format!("auto: {n} fallades seguides");
     match state.db.add_block(&pattern, Some(&note)).await {
@@ -129,11 +122,6 @@ async fn auto_blocklist(state: &AppState, url: &str, what: &str, n: i64) {
     if let Err(e) = state.db.clear_url_fail_count(url).await {
         tracing::warn!(error = %e, %url, "clear fail count fallit");
     }
-    state
-        .notify(&format!(
-            "⛔️ {what} fallida {n} cops seguits — URL afegida a la blocklist\n{url}"
-        ))
-        .await;
 }
 
 async fn handle(state: &AppState, job: Job) {
