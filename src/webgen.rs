@@ -5,6 +5,13 @@ use std::path::Path;
 use std::process::Command;
 
 /// Genera la web estatica a cfg.public_dir.
+///
+/// Disposició de dades (pensada per escalar amb molts links):
+///  - data/manifest.json          — total + llista de mesos (clau, comptador, emb)
+///  - data/months/{YYYY-MM}.json  — índex lleuger per mes (sense embeddings ni deep)
+///  - data/emb/{YYYY-MM}.json     — embeddings per mes (lazy, només si es fa servir el cor)
+///  - data/deep/{id}.json         — resum profund per enllaç (lazy en obrir el detall)
+///  - data/links.json / links.js  — índex lleuger complet: consum extern + fallback file://
 pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
     let links = db.list_links(None, None, None, 5000).await?;
     let dir = Path::new(&cfg.public_dir);
@@ -12,16 +19,25 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
     std::fs::create_dir_all(dir.join("css"))?;
     std::fs::create_dir_all(dir.join("js"))?;
 
-    // El resum profund (deep_summary) és el camp més pesat i només es mostra
-    // en obrir el detall. El treiem de l'índex i el desem per-enllaç a
-    // data/deep/{id}.json, carregat mandrosament quan s'obre l'anàlisi.
-    let deep_dir = dir.join("data/deep");
-    if deep_dir.exists() {
-        std::fs::remove_dir_all(&deep_dir)?;
+    // Directoris derivats: es regeneren sencers a cada `generate`.
+    for sub in ["data/deep", "data/months", "data/emb"] {
+        let d = dir.join(sub);
+        if d.exists() {
+            std::fs::remove_dir_all(&d)?;
+        }
+        std::fs::create_dir_all(&d)?;
     }
-    std::fs::create_dir_all(&deep_dir)?;
+    let deep_dir = dir.join("data/deep");
 
+    // L'índex lleuger treu els camps pesats o interns:
+    //  - deep_summary -> data/deep/{id}.json (lazy en obrir l'anàlisi)
+    //  - e/s (embedding quantitzat) -> data/emb/{mes}.json (lazy amb els cors)
+    //  - co_reporters (uuids interns) -> la web usa `reporters` (noms)
     let mut index: Vec<serde_json::Value> = Vec::with_capacity(links.len());
+    let mut months: std::collections::BTreeMap<String, Vec<(i64, serde_json::Value)>> =
+        std::collections::BTreeMap::new();
+    let mut embs: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
+        std::collections::BTreeMap::new();
     for l in &links {
         let mut v = serde_json::to_value(l)?;
         if let Some(obj) = v.as_object_mut() {
@@ -35,14 +51,62 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
                     )?;
                 }
             }
+            let month = l.created_at.format("%Y-%m").to_string();
+            if let (Some(e), Some(s)) = (obj.remove("e"), obj.remove("s")) {
+                embs.entry(month.clone())
+                    .or_default()
+                    .insert(l.id.to_string(), serde_json::json!({ "e": e, "s": s }));
+            }
+            obj.remove("co_reporters");
+            months
+                .entry(month)
+                .or_default()
+                .push((l.created_at.timestamp(), v.clone()));
         }
         index.push(v);
     }
 
+    // Shards mensuals (dins de cada mes: més recent primer) + embeddings.
+    for (key, items) in &mut months {
+        items.sort_by_key(|(t, _)| -*t);
+        let arr: Vec<&serde_json::Value> = items.iter().map(|(_, v)| v).collect();
+        std::fs::write(
+            dir.join(format!("data/months/{key}.json")),
+            serde_json::to_string(&arr)?,
+        )?;
+    }
+    for (key, map) in &embs {
+        std::fs::write(
+            dir.join(format!("data/emb/{key}.json")),
+            serde_json::to_string(map)?,
+        )?;
+    }
+
+    // Manifest: mesos de més recent a més antic. És el punt d'entrada del client.
+    let month_list: Vec<serde_json::Value> = months
+        .iter()
+        .rev()
+        .map(|(k, v)| {
+            serde_json::json!({
+                "key": k,
+                "count": v.len(),
+                "emb": embs.contains_key(k),
+            })
+        })
+        .collect();
+    let manifest = serde_json::json!({
+        "total": links.len(),
+        "months": month_list,
+    });
+    std::fs::write(
+        dir.join("data/manifest.json"),
+        serde_json::to_string(&manifest)?,
+    )?;
+
     let json = serde_json::to_string(&index)?;
     let json_pretty = serde_json::to_string_pretty(&index)?;
-    // links.json per consum extern; links.js incrustat perquè funcioni via file://
-    // (fetch() està bloquejat sota file:// a la majoria de navegadors).
+    // links.json per consum extern; links.js com a fallback per a file:// (fetch()
+    // està bloquejat sota file://: app.js l'injecta si el manifest no es pot carregar).
     std::fs::write(dir.join("data/links.json"), json_pretty)?;
     std::fs::write(
         dir.join("data/links.js"),
@@ -178,6 +242,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <button class="menu-item" data-act="new" role="menuitem"><span class="mi-check"></span> Mostra novetats</button>
           <button class="menu-item" data-act="new-dec" role="menuitem"><span class="mi-ico">◀</span> Novetats: un dia abans</button>
           <button class="menu-item" data-act="new-inc" role="menuitem"><span class="mi-ico">▶</span> Novetats: un dia després</button>
+          <div class="menu-sep" id="menu-hist-sep" hidden></div>
+          <button class="menu-item" data-act="hist-more" role="menuitem" hidden><span class="mi-ico">▼</span> Historial: un mes més</button>
+          <button class="menu-item" data-act="hist-less" role="menuitem" hidden><span class="mi-ico">▲</span> Historial: un mes menys</button>
           <div class="menu-sep"></div>
           <button class="menu-item" data-act="cols-dec" role="menuitem"><span class="mi-ico">−</span> Menys columnes</button>
           <button class="menu-item" data-act="cols-inc" role="menuitem"><span class="mi-ico">+</span> Més columnes</button>
@@ -220,7 +287,6 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </header>
   <main id="grid" class="grid"></main>
   <footer class="footer"><p>Generat per <strong>Clio</strong> · LinkAnalyzer</p></footer>
-  <script src="data/links.js?v={{DATAV}}"></script>
   <script src="js/app.js?v={{VERSION}}"></script>
 </body>
 </html>
@@ -327,6 +393,7 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .menu-item .mi-check, .menu-item .mi-ico {
   flex: none; width: 1.1em; text-align: center; color: var(--muted);
 }
+.menu-item:disabled { opacity: .4; cursor: not-allowed; }
 .menu-item.on .mi-check { color: var(--accent); }
 .menu-item.on .mi-check::before { content: "✓"; }
 .menu-sep { height: 1px; background: var(--border); margin: .28rem .35rem; }
@@ -448,6 +515,20 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .new-toggle.on { color: var(--accent); }
 .new-toggle.on b { color: var(--accent); }
 
+/* Historial carregat (fins a quin mes es veu) */
+.hist-toggle { cursor: pointer; user-select: none; transition: color var(--transition); }
+.hist-toggle:hover { color: var(--fg); }
+.hist-toggle.end { cursor: default; }
+.hist-toggle.end:hover { color: var(--muted); }
+.load-more-wrap { grid-column: 1/-1; text-align: center; padding: .4rem 0 1rem; }
+.load-more {
+  cursor: pointer; font-size: .88rem; padding: .55rem 1.2rem; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+  transition: all var(--transition);
+}
+.load-more:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.load-more:disabled { opacity: .5; cursor: wait; transform: none; }
+
 /* Sessió + accions per link */
 .topbar-actions { display: flex; gap: .5rem; }
 #token-btn.on { border-color: var(--accent); color: var(--accent); }
@@ -552,9 +633,17 @@ body.single-view .grid { display: block; max-width: 640px; margin: 0 auto; }
 
 const APP_JS: &str = r##""use strict";
 
-// Dades: incrustades a data/links.js (window.__LINKS__) per funcionar via file://.
-// Fallback a fetch si s'està servint per HTTP i no hi ha incrustat.
-let ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
+// Dades: manifest + shards mensuals (data/months/{YYYY-MM}.json) carregats
+// progressivament. Sota file:// (fetch bloquejat) s'injecta data/links.js com a
+// fallback amb tot l'índex lleuger (sense embeddings ni càrrega per mesos).
+const DATAV = '{{DATAV}}';
+let ALL = [];            // links dels mesos visibles (ordre cronològic invers)
+let MANIFEST = null;     // { total, months: [{key, count, emb}] } (mesos desc)
+let SHOWN = 0;           // nombre de mesos visibles
+let STATIC_MODE = false; // fallback links.js: tot carregat, sense historial
+const MONTH_CACHE = new Map(); // key mes -> array de links
+const EMB = new Map();         // id -> {e, s} (embedding quantitzat)
+const EMB_LOADED = new Set();  // mesos amb embeddings ja carregats
 let activeTag = null;   // filtre per tag (#tag:xxx)
 let activeUser = null;  // filtre per reporter (#at:xxx)
 let activeId = null;    // permalink: mostra només una card (#id:xxx)
@@ -639,6 +728,25 @@ function toast(msg, kind) {
   toastTimer = setTimeout(() => { el.className = 'toast'; }, 3200);
 }
 
+// Mutacions locals: cal tocar també la cache de mesos perquè rebuildAll()
+// reconstrueix ALL des d'allà.
+function removeLocal(id) {
+  ALL = ALL.filter(l => l.id !== id);
+  for (const arr of MONTH_CACHE.values()) {
+    const i = arr.findIndex(l => l.id === id);
+    if (i >= 0) arr.splice(i, 1);
+  }
+  hearts.delete(id);
+}
+function addLocal(l) {
+  if (ALL.some(x => x.id === l.id)) return;
+  ALL.unshift(l);
+  if (MANIFEST && MANIFEST.months.length) {
+    const arr = MONTH_CACHE.get(MANIFEST.months[0].key);
+    if (arr && !arr.some(x => x.id === l.id)) arr.unshift(l);
+  }
+}
+
 async function reprocessLink(id) {
   try { await api('POST', '/links/' + id + '/reprocess'); toast('Link reencuat: es tornarà a analitzar.', 'ok'); }
   catch (e) { toast('Error en reforçar: ' + e.message, 'err'); }
@@ -647,8 +755,7 @@ async function deleteLink(id) {
   if (!confirm('Segur que vols donar de baixa aquest link?')) return;
   try {
     await api('DELETE', '/links/' + id);
-    ALL = ALL.filter(l => l.id !== id);
-    hearts.delete(id);
+    removeLocal(id);
     renderStats(); buildFilters(); render();
     toast('Link donat de baixa.', 'ok');
   } catch (e) { toast('Error en donar de baixa: ' + e.message, 'err'); }
@@ -657,8 +764,7 @@ async function blockLink(id) {
   if (!confirm('Bloquejar aquest URL? S\'afegirà a la blocklist i el link s\'esborrarà.')) return;
   try {
     await api('POST', '/links/' + id + '/block');
-    ALL = ALL.filter(l => l.id !== id);
-    hearts.delete(id);
+    removeLocal(id);
     renderStats(); buildFilters(); render();
     toast('URL bloquejada i link esborrat.', 'ok');
   } catch (e) { toast('Error en bloquejar: ' + e.message, 'err'); }
@@ -704,7 +810,7 @@ async function addLink() {
       : (res.link_id ? [res.link_id] : []);
     // Prepend dels nous links perquè apareguin sense recarregar (encara "pending").
     for (const id of ids) {
-      try { const l = await api('GET', '/links/' + id); if (l && l.id && !ALL.some(x => x.id === l.id)) ALL.unshift(l); }
+      try { const l = await api('GET', '/links/' + id); if (l && l.id) addLocal(l); }
       catch (e) {}
     }
     renderStats(); buildFilters(); render();
@@ -829,8 +935,25 @@ function writeHearts(ids) {
     '; path=/; max-age=31536000; SameSite=Lax';
 }
 let hearts = new Set(readHearts());
-// Hi ha embeddings disponibles? Si no, el cor no té efecte d'ordre: l'amaguem.
-const HAS_EMBED = ALL.some(l => Array.isArray(l.e) && typeof l.s === 'number');
+// Hi ha embeddings publicats? Si no, el cor no té efecte d'ordre: l'amaguem.
+// Els vectors viuen a data/emb/{mes}.json i només es baixen quan hi ha cors.
+function embAvailable() {
+  return !STATIC_MODE && !!(MANIFEST && MANIFEST.months.some(m => m.emb));
+}
+
+// Baixa els embeddings dels mesos visibles (un fetch per mes, un sol cop).
+// No fa res sense cors: la majoria de visites no paguen aquest pes.
+async function ensureEmb() {
+  if (!embAvailable() || !hearts.size) return;
+  const pend = MANIFEST.months.slice(0, SHOWN).filter(m => m.emb && !EMB_LOADED.has(m.key));
+  await Promise.all(pend.map(async m => {
+    EMB_LOADED.add(m.key);
+    try {
+      const d = await fetchJson('data/emb/' + m.key + '.json');
+      for (const id in d) EMB.set(id, d[id]);
+    } catch (e) { EMB_LOADED.delete(m.key); }
+  }));
+}
 
 function toggleHeart(id) {
   if (hearts.has(id)) hearts.delete(id); else hearts.add(id);
@@ -838,9 +961,10 @@ function toggleHeart(id) {
 }
 
 // Dequantitza l'embedding int8 d'un link -> array de floats (o null).
-function vecOf(l) {
-  if (!Array.isArray(l.e) || typeof l.s !== 'number') return null;
-  const e = l.e, s = l.s, out = new Array(e.length);
+function embVec(id) {
+  const d = EMB.get(id);
+  if (!d || !Array.isArray(d.e) || typeof d.s !== 'number') return null;
+  const e = d.e, s = d.s, out = new Array(e.length);
   for (let i = 0; i < e.length; i++) out[i] = e[i] * s;
   return out;
 }
@@ -848,9 +972,8 @@ function vecOf(l) {
 // Centroide (mitjana) dels embeddings dels links amb cor. null si no n'hi ha cap.
 function centroid() {
   let acc = null, n = 0;
-  for (const l of ALL) {
-    if (!hearts.has(l.id)) continue;
-    const v = vecOf(l);
+  for (const id of hearts) {
+    const v = embVec(id);
     if (!v) continue;
     if (!acc) acc = new Array(v.length).fill(0);
     for (let i = 0; i < v.length; i++) acc[i] += v[i];
@@ -1078,9 +1201,9 @@ function render() {
   });
 
   // Ordre personalitzat: per afinitat (cosine) amb el centroide dels cors.
-  // Sense cors, es manté l'ordre per defecte del backend (updated_at DESC).
+  // Sense cors, es manté l'ordre cronològic invers (created_at DESC).
   const cen = centroid();
-  if (cen) items.forEach(l => { const v = vecOf(l); l.__score = v ? cosine(v, cen) : -1; });
+  if (cen) items.forEach(l => { const v = embVec(l.id); l.__score = v ? cosine(v, cen) : -1; });
   if (onlyNew || cen) {
     items.sort((a, b) => {
       // Amb "novetats" actiu: nous primer, antics després; cada grup per interès.
@@ -1092,14 +1215,53 @@ function render() {
 
   items.forEach(l => { grid.appendChild(buildCard(l)); });
 
-  if (!items.length) grid.innerHTML = '<div class="empty">Cap resultat amb aquests filtres.</div>';
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'empty';
+    e.textContent = MANIFEST && SHOWN < MANIFEST.months.length
+      ? 'Cap resultat amb aquests filtres en el període carregat.'
+      : 'Cap resultat amb aquests filtres.';
+    grid.appendChild(e);
+  }
+
+  // Botó per estirar un mes més d'historial al final de la graella.
+  if (!STATIC_MODE && MANIFEST && SHOWN < MANIFEST.months.length) {
+    const next = MANIFEST.months[SHOWN];
+    const w = document.createElement('div');
+    w.className = 'load-more-wrap';
+    const b = document.createElement('button');
+    b.className = 'load-more';
+    b.textContent = '⬇ Carrega ' + monthLabel(next.key) + ' · ' + next.count +
+      (next.count === 1 ? ' enllaç' : ' enllaços');
+    b.onclick = async () => { b.disabled = true; await showMonths(SHOWN + 1); };
+    w.appendChild(b);
+    grid.appendChild(w);
+  }
 }
 
 // Vista d'una sola card via permalink (#id:xxx). Afegeix un enllaç a l'inici.
+// Si el link és d'un mes no carregat, es cerca cap enrere pels shards.
+const SINGLE_SEARCHED = new Set();
 function renderSingle(grid) {
   const l = ALL.find(x => x.id === activeId);
-  if (l) grid.appendChild(buildCard(l));
-  else grid.innerHTML = '<div class="empty">Aquest enllaç no existeix o s\'ha donat de baixa.</div>';
+  if (l) {
+    grid.appendChild(buildCard(l));
+  } else if (!STATIC_MODE && MANIFEST && SHOWN < MANIFEST.months.length && !SINGLE_SEARCHED.has(activeId)) {
+    SINGLE_SEARCHED.add(activeId);
+    const id = activeId;
+    grid.innerHTML = '<div class="empty">Cercant l\'enllaç…</div>';
+    (async () => {
+      let upto = 0;
+      for (let i = SHOWN; i < MANIFEST.months.length; i++) {
+        const arr = await loadMonth(MANIFEST.months[i].key);
+        if (arr.some(x => x.id === id)) { upto = i + 1; break; }
+      }
+      if (activeId !== id) return; // l'usuari ha navegat mentre cercàvem
+      if (upto) await showMonths(upto, false); else render();
+    })();
+  } else {
+    grid.innerHTML = '<div class="empty">Aquest enllaç no existeix o s\'ha donat de baixa.</div>';
+  }
   const home = document.createElement('div');
   home.className = 'home-link';
   home.innerHTML = '<a href="#">← Torna a tots els enllaços</a>';
@@ -1127,7 +1289,7 @@ function buildCard(l) {
           ${isNew(l) ? '<span class="badge-new" title="Nou des de la teva última visita">NOU</span>' : ''}
           <span class="badge t-${type}">${type}</span>
           <a class="permalink" href="#id:${esc(l.id)}" title="Enllaç permanent a aquesta card" aria-label="Enllaç permanent">🔗</a>
-          ${HAS_EMBED ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
+          ${embAvailable() ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}
         </div>
         <div class="card-tabs">
           <button class="tab on" data-panel="info" title="Info">ℹ️</button>
@@ -1171,7 +1333,7 @@ function buildCard(l) {
       }
     }));
     const hb = card.querySelector('.heart');
-    if (hb) hb.onclick = () => { toggleHeart(l.id); render(); };
+    if (hb) hb.onclick = async () => { toggleHeart(l.id); await ensureEmb(); render(); };
     const rf = card.querySelector('.act-refresh');
     if (rf) rf.onclick = () => reprocessLink(l.id);
     const dl = card.querySelector('.act-delete');
@@ -1187,8 +1349,8 @@ function buildCard(l) {
 function renderPerso() {
   const box = $('perso');
   if (!box) return;
-  const n = [...hearts].filter(id => ALL.some(l => l.id === id)).length;
-  if (!HAS_EMBED || !n) { box.className = 'perso'; box.innerHTML = ''; return; }
+  const n = [...hearts].filter(id => EMB.has(id) || ALL.some(l => l.id === id)).length;
+  if (!embAvailable() || !n) { box.className = 'perso'; box.innerHTML = ''; return; }
   box.className = 'perso on';
   box.innerHTML = '<span>❤ Ordenat per afinitat amb <b>' + n + '</b> ' +
     (n === 1 ? 'enllaç marcat' : 'enllaços marcats') + '</span>' +
@@ -1197,12 +1359,12 @@ function renderPerso() {
 }
 
 function renderStats() {
-  const total = ALL.length;
+  const total = (!STATIC_MODE && MANIFEST) ? MANIFEST.total : ALL.length;
   const done = ALL.filter(l => l.status === 'done').length;
   const tags = new Set(); ALL.forEach(l => (l.tags||[]).forEach(t => tags.add(t)));
   const newCount = ALL.filter(isNew).length;
   let html =
-    `<span><b>${total}</b> enllaços</span>` +
+    `<span><b>${ALL.length}</b>${total > ALL.length ? ' de ' + total : ''} enllaços</span>` +
     `<span><b>${done}</b> processats</span>` +
     `<span id="tags-toggle" class="tags-toggle${filtersOpen ? ' on' : ''}" ` +
       `title="Mostra/amaga el llistat de tags"># <b>${tags.size}</b> tags</span>`;
@@ -1210,11 +1372,21 @@ function renderStats() {
     html += `<span id="new-toggle" class="new-toggle${onlyNew ? ' on' : ''}" ` +
       `title="Mostra només novetats">✨ <b>${newCount}</b> novetats</span>`;
   }
+  // Fins a quin mes es veu l'historial; clicant es carrega un mes més.
+  if (!STATIC_MODE && MANIFEST && MANIFEST.months.length) {
+    const cur = MANIFEST.months[Math.min(SHOWN, MANIFEST.months.length) - 1];
+    const more = SHOWN < MANIFEST.months.length;
+    html += `<span id="hist-toggle" class="hist-toggle${more ? '' : ' end'}" ` +
+      `title="${more ? 'Historial visible. Clica per carregar un mes més' : 'Tot l\'historial és visible'}">` +
+      `📅 fins <b>${monthLabel(cur.key)}</b>${more ? ' ＋' : ''}</span>`;
+  }
   $('stats').innerHTML = html;
   const tt = $('tags-toggle');
   if (tt) tt.onclick = () => { filtersOpen = !filtersOpen; renderStats(); buildFilters(); updateMenuState(); };
   const nt = $('new-toggle');
   if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); };
+  const ht = $('hist-toggle');
+  if (ht && MANIFEST && SHOWN < MANIFEST.months.length) ht.onclick = () => showMonths(SHOWN + 1);
 }
 
 // ---- Menú (☰): cercador, tags, novetats, columnes, tema, accions API ----
@@ -1241,6 +1413,8 @@ function menuAction(act) {
     case 'new': onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); break;
     case 'new-dec': shiftNew(-1); break;
     case 'new-inc': shiftNew(1); break;
+    case 'hist-more': showMonths(SHOWN + 1); break;
+    case 'hist-less': showMonths(SHOWN - 1); break;
     case 'cols-dec': colsDec(); break;
     case 'cols-inc': colsInc(); break;
     case 'theme': toggleTheme(); break;
@@ -1293,9 +1467,90 @@ function initMenu() {
   updateMenuState();
 }
 
-async function maybeFetch() {
-  if (ALL.length || location.protocol === 'file:') return;
-  try { const r = await fetch('data/links.json?v={{DATAV}}'); if (r.ok) ALL = await r.json(); } catch (e) {}
+// ---- Càrrega progressiva de dades (manifest + shards mensuals) ----
+
+async function fetchJson(path) {
+  const r = await fetch(path + '?v=' + DATAV);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+const MONTHS_CA = ['gener','febrer','març','abril','maig','juny','juliol','agost','setembre','octubre','novembre','desembre'];
+function monthLabel(key) {
+  const p = (key || '').split('-');
+  const m = parseInt(p[1], 10);
+  return (MONTHS_CA[m - 1] || key) + ' ' + p[0];
+}
+
+// Mesos visibles persistits (0 = decideix el defecte inicial).
+function readMonthsCookie() { const m = document.cookie.match(/(?:^|;\s*)clio_months=(\d+)/); return m ? parseInt(m[1], 10) : 0; }
+function writeMonthsCookie(n) { document.cookie = 'clio_months=' + n + '; path=/; max-age=31536000; SameSite=Lax'; }
+
+async function loadMonth(key) {
+  if (MONTH_CACHE.has(key)) return MONTH_CACHE.get(key);
+  let arr = [];
+  try { arr = await fetchJson('data/months/' + key + '.json'); } catch (e) {}
+  if (!Array.isArray(arr)) arr = [];
+  MONTH_CACHE.set(key, arr);
+  return arr;
+}
+
+// Reconstrueix ALL amb els SHOWN primers mesos, en ordre cronològic invers.
+function rebuildAll() {
+  ALL = [];
+  for (const m of MANIFEST.months.slice(0, SHOWN)) {
+    ALL = ALL.concat(MONTH_CACHE.get(m.key) || []);
+  }
+  ALL.sort((a, b) => linkTime(b) - linkTime(a));
+}
+
+// Fixa el nombre de mesos visibles (clamp a [1, total]), carregant el que falti.
+async function showMonths(n, persist = true) {
+  if (STATIC_MODE || !MANIFEST || !MANIFEST.months.length) return;
+  n = Math.max(1, Math.min(n, MANIFEST.months.length));
+  SHOWN = n;
+  if (persist) writeMonthsCookie(n);
+  await Promise.all(MANIFEST.months.slice(0, n).map(m => loadMonth(m.key)));
+  rebuildAll();
+  await ensureEmb();
+  refreshHistItems();
+  renderStats(); buildFilters(); render();
+}
+
+// Ítems del menú d'historial: només tenen sentit amb manifest i més d'un mes.
+function refreshHistItems() {
+  const more = document.querySelector('.menu-item[data-act="hist-more"]');
+  const less = document.querySelector('.menu-item[data-act="hist-less"]');
+  const sep = $('menu-hist-sep');
+  const ok = !STATIC_MODE && !!MANIFEST && MANIFEST.months.length > 1;
+  if (sep) sep.hidden = !ok;
+  if (more) { more.hidden = !ok; more.disabled = ok && SHOWN >= MANIFEST.months.length; }
+  if (less) { less.hidden = !ok; less.disabled = ok && SHOWN <= 1; }
+}
+
+// Fallback file:// (o manifest absent): injecta data/links.js amb tot l'índex
+// lleuger incrustat. Sense embeddings ni historial per mesos.
+function loadFallbackScript() {
+  return new Promise(resolve => {
+    const s = document.createElement('script');
+    s.src = 'data/links.js?v=' + DATAV;
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+}
+
+async function loadData() {
+  if (location.protocol !== 'file:') {
+    try {
+      const m = await fetchJson('data/manifest.json');
+      if (m && Array.isArray(m.months)) { MANIFEST = m; return; }
+    } catch (e) {}
+  }
+  STATIC_MODE = true;
+  await loadFallbackScript();
+  ALL = Array.isArray(window.__LINKS__) ? window.__LINKS__ : [];
+  ALL.sort((a, b) => linkTime(b) - linkTime(a));
 }
 
 (async function init() {
@@ -1304,11 +1559,25 @@ async function maybeFetch() {
   await probeApi();
   await loadMe();
   initMenu();
-  await maybeFetch();
+  await loadData();
   applyHash();
-  renderStats();
-  buildFilters();
-  render();
+  if (MANIFEST) {
+    // Mesos inicials: cookie si n'hi ha; si no, els que calguin per arribar
+    // a ~60 enllaços (mínim 1 mes).
+    let n = readMonthsCookie();
+    if (!n) {
+      let acc = 0;
+      n = 0;
+      for (const m of MANIFEST.months) { n++; acc += m.count; if (acc >= 60) break; }
+      n = Math.max(n, 1);
+    }
+    await showMonths(n, false);
+  } else {
+    renderStats();
+    buildFilters();
+    render();
+  }
+  refreshHistItems();
   window.addEventListener('hashchange', onHashChange);
   $('search').addEventListener('input', render);
   $('type-filter').addEventListener('change', render);

@@ -35,7 +35,7 @@ DB=target/debug/linkanalyzer
 $DB user-add alice --admin    # crea usuari -> imprimeix api_token
 $DB add https://www.rust-lang.org
 $DB list
-$DB generate                  # escriu ./public (index.html, data/links.json, css, js)
+$DB generate                  # escriu ./public (index.html, data/manifest.json + shards, css, js)
 $DB reindex                   # backfill d'embeddings dels links existents
 $DB serve                     # API + bot a http://127.0.0.1:8080
 ```
@@ -143,6 +143,16 @@ linkanalyzer serve                                                      # el sch
 Dedup i co-reporting són automàtics: si un feed re-veu un link ja existent, s'afegeix l'NPC com a co-reporter (no es duplica). El feed pren el primer `<link>` de cada entrada.
 
 **Fase 2 (pendent): scrape.** `FeedKind::Scrape` i la columna `config_json` ja estan reservats. La idea: `pipeline::fetch` (amb fallback FlareSolverr) baixa l'HTML i una passada d'IA el converteix en notícies. Encara no implementat.
+
+## Web estàtica: disposició de dades
+
+La web carrega les dades progressivament per escalar amb molts links:
+
+- `data/manifest.json` — total + mesos disponibles (clau `YYYY-MM`, comptador, si tenen embeddings). Punt d'entrada del client.
+- `data/months/{YYYY-MM}.json` — índex lleuger per mes (sense embeddings ni resum profund). El client comença amb els mesos més recents (~60 links) i n'estira més des del menú («Historial: un mes més»), el chip 📅 de la barra d'estadístiques o el botó al final de la graella.
+- `data/emb/{YYYY-MM}.json` — embeddings quantitzats per mes; només es baixen si l'usuari fa servir els cors (ranking personalitzat).
+- `data/deep/{id}.json` — resum profund per enllaç, carregat en obrir l'anàlisi.
+- `data/links.json` + `data/links.js` — índex lleuger complet: consum extern i fallback per a `file://` (on fetch està bloquejat, app.js injecta `links.js`; en aquest mode no hi ha historial per mesos ni cors).
 
 ## Git push + deploy reactiu (opt-in)
 
