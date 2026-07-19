@@ -95,6 +95,11 @@ pub struct Config {
     /// Límits per a la segona passada (clone de repos).
     pub clone_timeout_secs: u64,
     pub clone_max_mb: u64,
+    /// Categories de fonts per a la web estàtica. Format:
+    /// WEB_CATEGORIES="general=clio,hackernews;esports=usuari2,usuari5"
+    pub web_categories: Vec<(String, Vec<String>)>,
+    /// Categoria seguida per defecte pels visitants nous (buida = totes les fonts).
+    pub web_default_category: Option<String>,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -190,6 +195,24 @@ impl Config {
             web_debounce_secs,
             clone_timeout_secs,
             clone_max_mb,
+            web_categories: parse_categories(&get("WEB_CATEGORIES", "")),
+            web_default_category: opt("WEB_DEFAULT_CATEGORY"),
         })
     }
+}
+
+/// "general=a,b;esports=c" -> [("general", ["a","b"]), ("esports", ["c"])]
+fn parse_categories(raw: &str) -> Vec<(String, Vec<String>)> {
+    raw.split(';')
+        .filter_map(|part| {
+            let (name, users) = part.split_once('=')?;
+            let name = name.trim();
+            let users: Vec<String> = users
+                .split(',')
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .collect();
+            (!name.is_empty() && !users.is_empty()).then(|| (name.to_string(), users))
+        })
+        .collect()
 }

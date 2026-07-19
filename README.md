@@ -144,15 +144,32 @@ Dedup i co-reporting són automàtics: si un feed re-veu un link ja existent, s'
 
 **Fase 2 (pendent): scrape.** `FeedKind::Scrape` i la columna `config_json` ja estan reservats. La idea: `pipeline::fetch` (amb fallback FlareSolverr) baixa l'HTML i una passada d'IA el converteix en notícies. Encara no implementat.
 
-## Web estàtica: disposició de dades
+## Web estàtica: fonts seguides i disposició de dades
 
-La web carrega les dades progressivament per escalar amb molts links:
+La web gira al voltant de **seguir fonts** (usuaris i NPCs): cada visitant tria quines segueix (cookie al navegador) i només es baixen i mostren els seus links. Les dades es publiquen per font, mes i part per escalar amb molts links:
 
-- `data/manifest.json` — total + mesos disponibles (clau `YYYY-MM`, comptador, si tenen embeddings). Punt d'entrada del client.
-- `data/months/{YYYY-MM}.json` — índex lleuger per mes (sense embeddings ni resum profund). El client comença amb els mesos més recents (~60 links) i n'estira més des del menú («Historial: un mes més»), el chip 📅 de la barra d'estadístiques o el botó al final de la graella.
-- `data/emb/{YYYY-MM}.json` — embeddings quantitzats per mes; només es baixen si l'usuari fa servir els cors (ranking personalitzat).
-- `data/deep/{id}.json` — resum profund per enllaç, carregat en obrir l'anàlisi.
-- `data/links.json` + `data/links.js` — índex lleuger complet: consum extern i fallback per a `file://` (on fetch està bloquejat, app.js injecta `links.js`; en aquest mode no hi ha historial per mesos ni cors).
+- `data/manifest.json` — punt d'entrada: total + fonts (`name`, `dir`, `role`, `total`, mesos amb `parts`) + categories.
+- `data/u/{font}/{YYYY-MM}-p{N}.json` — índex lleuger per font, mes i part (~200 links/part). Un link co-reportat apareix al shard de cada reporter; el client dedupa per id.
+- `data/u/{font}/emb-{YYYY-MM}-p{N}.json` — embeddings quantitzats alineats al part; només es baixen si es fan servir els cors.
+- `data/i/{id}.json` — fitxa lleugera per enllaç (permalinks `#id:` de qualsevol font, seguida o no).
+- `data/deep/{id}.json` — resum profund, carregat en obrir l'anàlisi.
+- `data/links.json` + `data/links.js` — índex lleuger complet: consum extern i fallback per a `file://` (on fetch està bloquejat, app.js injecta `links.js`; en aquest mode no hi ha fonts ni historial per mesos).
+
+**UI**: chip `👥 N fonts` (o menú «Fonts que segueixes») obre el selector de categories i fonts; chip `📅 fins <mes>`, menú «Historial: un mes més/menys» i botó al final de la graella estiren l'historial. La graella pinta ~60 cards i creix amb scroll (render incremental: no es construeixen milers de cards de cop).
+
+### Categories (`.env`)
+
+```env
+WEB_CATEGORIES=general=clio,hackernews;tecnologia=wired,ars-technica
+WEB_DEFAULT_CATEGORY=general
+```
+
+`WEB_DEFAULT_CATEGORY` és el que veu un visitant nou sense selecció (buida = totes les fonts). Truc per a l'onboarding: crea un usuari `clio` que reporti enllaços de documentació (com fer servir la web, els cors, les categories) i posa'l a la categoria per defecte:
+
+```bash
+linkanalyzer user-add clio
+linkanalyzer add https://github.com/agustim/clio#readme   # amb el token de clio via API, o des del CLI
+```
 
 ## Git push + deploy reactiu (opt-in)
 

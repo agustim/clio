@@ -4,42 +4,65 @@ use crate::error::{AppError, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Mida màxima (links) d'un part dins d'un mes. Fonts amb molt volum (NPCs)
+/// queden en trossos descarregables progressivament.
+const PART_SIZE: usize = 200;
+
+/// Nom de fitxer segur per a un username (el client el rep com a `dir` al manifest).
+fn user_dir(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Genera la web estatica a cfg.public_dir.
 ///
-/// Disposició de dades (pensada per escalar amb molts links):
-///  - data/manifest.json          — total + llista de mesos (clau, comptador, emb)
-///  - data/months/{YYYY-MM}.json  — índex lleuger per mes (sense embeddings ni deep)
-///  - data/emb/{YYYY-MM}.json     — embeddings per mes (lazy, només si es fa servir el cor)
-///  - data/deep/{id}.json         — resum profund per enllaç (lazy en obrir el detall)
-///  - data/links.json / links.js  — índex lleuger complet: consum extern + fallback file://
+/// Disposició de dades (per usuari/font, pensada per "seguir N fonts"):
+///  - data/manifest.json                     — total + fonts (mesos, parts, emb) + categories
+///  - data/u/{font}/{YYYY-MM}-p{N}.json      — índex lleuger per font, mes i part
+///  - data/u/{font}/emb-{YYYY-MM}-p{N}.json  — embeddings alineats al part (lazy amb els cors)
+///  - data/i/{id}.json                       — fitxa lleugera per enllaç (permalinks)
+///  - data/deep/{id}.json                    — resum profund (lazy en obrir el detall)
+///  - data/links.json / links.js             — índex lleuger complet: consum extern + fallback file://
 pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
-    let links = db.list_links(None, None, None, 5000).await?;
+    let links = db.list_links(None, None, None, 100_000).await?;
+    let users = db.list_users().await?;
     let dir = Path::new(&cfg.public_dir);
     std::fs::create_dir_all(dir.join("data"))?;
     std::fs::create_dir_all(dir.join("css"))?;
     std::fs::create_dir_all(dir.join("js"))?;
 
     // Directoris derivats: es regeneren sencers a cada `generate`.
-    for sub in ["data/deep", "data/months", "data/emb"] {
+    // months/ i emb/ són el layout antic (per mes global): es netegen si queden.
+    for sub in ["data/deep", "data/u", "data/i", "data/months", "data/emb"] {
         let d = dir.join(sub);
         if d.exists() {
             std::fs::remove_dir_all(&d)?;
         }
-        std::fs::create_dir_all(&d)?;
+    }
+    for sub in ["data/deep", "data/u", "data/i"] {
+        std::fs::create_dir_all(dir.join(sub))?;
     }
     let deep_dir = dir.join("data/deep");
 
     // L'índex lleuger treu els camps pesats o interns:
     //  - deep_summary -> data/deep/{id}.json (lazy en obrir l'anàlisi)
-    //  - e/s (embedding quantitzat) -> data/emb/{mes}.json (lazy amb els cors)
+    //  - e/s (embedding quantitzat) -> data/u/{font}/emb-*.json (lazy amb els cors)
     //  - co_reporters (uuids interns) -> la web usa `reporters` (noms)
     let mut index: Vec<serde_json::Value> = Vec::with_capacity(links.len());
-    let mut months: std::collections::BTreeMap<String, Vec<(i64, serde_json::Value)>> =
-        std::collections::BTreeMap::new();
-    let mut embs: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
-        std::collections::BTreeMap::new();
+    // (ts, id, light, emb) per repartir per font; un link co-reportat va al shard
+    // de cada reporter (dedup per id al client).
+    let mut rows: Vec<(i64, String, serde_json::Value, Option<serde_json::Value>)> =
+        Vec::with_capacity(links.len());
     for l in &links {
         let mut v = serde_json::to_value(l)?;
+        let mut emb = None;
         if let Some(obj) = v.as_object_mut() {
             let ds = obj.remove("deep_summary");
             if let Some(s) = ds.as_ref().and_then(|d| d.as_str()) {
@@ -51,52 +74,116 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
                     )?;
                 }
             }
-            let month = l.created_at.format("%Y-%m").to_string();
             if let (Some(e), Some(s)) = (obj.remove("e"), obj.remove("s")) {
-                embs.entry(month.clone())
-                    .or_default()
-                    .insert(l.id.to_string(), serde_json::json!({ "e": e, "s": s }));
+                emb = Some(serde_json::json!({ "e": e, "s": s }));
             }
             obj.remove("co_reporters");
-            months
-                .entry(month)
-                .or_default()
-                .push((l.created_at.timestamp(), v.clone()));
         }
+        std::fs::write(
+            dir.join(format!("data/i/{}.json", l.id)),
+            serde_json::to_string(&v)?,
+        )?;
+        rows.push((l.created_at.timestamp(), l.id.to_string(), v.clone(), emb));
         index.push(v);
     }
 
-    // Shards mensuals (dins de cada mes: més recent primer) + embeddings.
-    for (key, items) in &mut months {
-        items.sort_by_key(|(t, _)| -*t);
-        let arr: Vec<&serde_json::Value> = items.iter().map(|(_, v)| v).collect();
-        std::fs::write(
-            dir.join(format!("data/months/{key}.json")),
-            serde_json::to_string(&arr)?,
-        )?;
+    // Reparteix per font (reporter). Ordre dins de cada font: més recent primer.
+    let mut per_user: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, l) in links.iter().enumerate() {
+        for rep in &l.reporters {
+            per_user.entry(rep.clone()).or_default().push(i);
+        }
     }
-    for (key, map) in &embs {
-        std::fs::write(
-            dir.join(format!("data/emb/{key}.json")),
-            serde_json::to_string(map)?,
-        )?;
-    }
-
-    // Manifest: mesos de més recent a més antic. És el punt d'entrada del client.
-    let month_list: Vec<serde_json::Value> = months
+    let role_of: std::collections::HashMap<&str, String> = users
         .iter()
-        .rev()
-        .map(|(k, v)| {
-            serde_json::json!({
-                "key": k,
-                "count": v.len(),
-                "emb": embs.contains_key(k),
-            })
+        .map(|u| (u.username.as_str(), format!("{:?}", u.role).to_lowercase()))
+        .collect();
+
+    let mut user_entries: Vec<serde_json::Value> = Vec::new();
+    for (name, mut idxs) in per_user {
+        idxs.sort_by_key(|&i| -rows[i].0);
+        let udir = user_dir(&name);
+        std::fs::create_dir_all(dir.join("data/u").join(&udir))?;
+        let has_emb = idxs.iter().any(|&i| rows[i].3.is_some());
+
+        // Agrupa per mes conservant l'ordre (desc) i talla en parts de PART_SIZE.
+        let mut month_list: Vec<serde_json::Value> = Vec::new();
+        let mut months: Vec<(String, Vec<usize>)> = Vec::new();
+        for &i in &idxs {
+            let month = chrono::DateTime::from_timestamp(rows[i].0, 0)
+                .map(|d| d.format("%Y-%m").to_string())
+                .unwrap_or_else(|| "0000-00".into());
+            match months.last_mut() {
+                Some((k, v)) if *k == month => v.push(i),
+                _ => months.push((month, vec![i])),
+            }
+        }
+        for (key, mids) in &months {
+            let parts: Vec<&[usize]> = mids.chunks(PART_SIZE).collect();
+            for (p, chunk) in parts.iter().enumerate() {
+                let arr: Vec<&serde_json::Value> = chunk.iter().map(|&i| &rows[i].2).collect();
+                std::fs::write(
+                    dir.join(format!("data/u/{udir}/{key}-p{p}.json")),
+                    serde_json::to_string(&arr)?,
+                )?;
+                if has_emb {
+                    let mut map = serde_json::Map::new();
+                    for &i in chunk.iter() {
+                        if let Some(e) = &rows[i].3 {
+                            map.insert(rows[i].1.clone(), e.clone());
+                        }
+                    }
+                    std::fs::write(
+                        dir.join(format!("data/u/{udir}/emb-{key}-p{p}.json")),
+                        serde_json::to_string(&map)?,
+                    )?;
+                }
+            }
+            month_list.push(serde_json::json!({
+                "key": key,
+                "count": mids.len(),
+                "parts": parts.len(),
+            }));
+        }
+        user_entries.push(serde_json::json!({
+            "name": name,
+            "dir": udir,
+            "role": role_of.get(name.as_str()).cloned().unwrap_or_else(|| "user".into()),
+            "total": idxs.len(),
+            "emb": has_emb,
+            "months": month_list,
+        }));
+    }
+    user_entries.sort_by_key(|u| -(u["total"].as_i64().unwrap_or(0)));
+
+    // Categories (config): només amb fonts que existeixen de veritat.
+    let known: std::collections::HashSet<&str> = user_entries
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    let categories: Vec<serde_json::Value> = cfg
+        .web_categories
+        .iter()
+        .filter_map(|(name, members)| {
+            let members: Vec<&String> =
+                members.iter().filter(|m| known.contains(m.as_str())).collect();
+            if members.is_empty() {
+                tracing::warn!(category = %name, "WEB_CATEGORIES: cap font coneguda, s'omet");
+                return None;
+            }
+            Some(serde_json::json!({
+                "name": name,
+                "users": members,
+                "default": cfg.web_default_category.as_deref() == Some(name.as_str()),
+            }))
         })
         .collect();
+
     let manifest = serde_json::json!({
         "total": links.len(),
-        "months": month_list,
+        "users": user_entries,
+        "categories": categories,
     });
     std::fs::write(
         dir.join("data/manifest.json"),
@@ -243,6 +330,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           <button class="menu-item" data-act="new-dec" role="menuitem"><span class="mi-ico">◀</span> Novetats: un dia abans</button>
           <button class="menu-item" data-act="new-inc" role="menuitem"><span class="mi-ico">▶</span> Novetats: un dia després</button>
           <div class="menu-sep" id="menu-hist-sep" hidden></div>
+          <button class="menu-item" data-act="follow" role="menuitem" hidden><span class="mi-ico">👥</span> Fonts que segueixes</button>
           <button class="menu-item" data-act="hist-more" role="menuitem" hidden><span class="mi-ico">▼</span> Historial: un mes més</button>
           <button class="menu-item" data-act="hist-less" role="menuitem" hidden><span class="mi-ico">▲</span> Historial: un mes menys</button>
           <div class="menu-sep"></div>
@@ -520,6 +608,19 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .hist-toggle:hover { color: var(--fg); }
 .hist-toggle.end { cursor: default; }
 .hist-toggle.end:hover { color: var(--muted); }
+
+/* Fonts seguides (chip + modal) */
+.follow-toggle { cursor: pointer; user-select: none; transition: color var(--transition); }
+.follow-toggle:hover { color: var(--fg); }
+.flw-sec { margin: .3rem 0 .9rem; }
+.flw-sec h4 { margin: 0 0 .45rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+.flw-row { display: flex; align-items: center; gap: .55rem; padding: .38rem .45rem; border-radius: 8px; cursor: pointer; }
+.flw-row:hover { background: var(--card-hover); }
+.flw-row input { accent-color: var(--accent); }
+.flw-row .flw-n { margin-left: auto; color: var(--faint); font-size: .8rem; }
+.flw-row .rolebadge { font-size: .66rem; }
+.flw-foot { display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--border); flex-wrap: wrap; }
+.flw-hint { color: var(--faint); font-size: .8rem; margin-right: auto; align-self: center; }
 .load-more-wrap { grid-column: 1/-1; text-align: center; padding: .4rem 0 1rem; }
 .load-more {
   cursor: pointer; font-size: .88rem; padding: .55rem 1.2rem; border-radius: 10px;
@@ -633,17 +734,20 @@ body.single-view .grid { display: block; max-width: 640px; margin: 0 auto; }
 
 const APP_JS: &str = r##""use strict";
 
-// Dades: manifest + shards mensuals (data/months/{YYYY-MM}.json) carregats
-// progressivament. Sota file:// (fetch bloquejat) s'injecta data/links.js com a
-// fallback amb tot l'índex lleuger (sense embeddings ni càrrega per mesos).
+// Dades: manifest amb fonts (usuaris) + shards per font/mes/part
+// (data/u/{font}/{YYYY-MM}-p{N}.json) carregats progressivament segons les
+// fonts seguides. Sota file:// (fetch bloquejat) s'injecta data/links.js com a
+// fallback amb tot l'índex lleuger (sense seguits ni càrrega per mesos).
 const DATAV = '{{DATAV}}';
-let ALL = [];            // links dels mesos visibles (ordre cronològic invers)
-let MANIFEST = null;     // { total, months: [{key, count, emb}] } (mesos desc)
+let ALL = [];            // links visibles fusionats (ordre cronològic invers)
+let MANIFEST = null;     // { total, users: [{name,dir,role,total,emb,months}], categories }
+let MONTHS = [];         // línia temporal fusionada de les fonts seguides: [{key,count}] desc
 let SHOWN = 0;           // nombre de mesos visibles
-let STATIC_MODE = false; // fallback links.js: tot carregat, sense historial
-const MONTH_CACHE = new Map(); // key mes -> array de links
+let STATIC_MODE = false; // fallback links.js: tot carregat, sense fonts ni historial
+const PART_CACHE = new Map();  // "dir|mes" -> array de links (parts fusionats)
+const EXTRA = [];              // links afegits en calent via API (encara sense shard)
 const EMB = new Map();         // id -> {e, s} (embedding quantitzat)
-const EMB_LOADED = new Set();  // mesos amb embeddings ja carregats
+const EMB_LOADED = new Set();  // "dir|mes" amb embeddings ja carregats
 let activeTag = null;   // filtre per tag (#tag:xxx)
 let activeUser = null;  // filtre per reporter (#at:xxx)
 let activeId = null;    // permalink: mostra només una card (#id:xxx)
@@ -728,23 +832,22 @@ function toast(msg, kind) {
   toastTimer = setTimeout(() => { el.className = 'toast'; }, 3200);
 }
 
-// Mutacions locals: cal tocar també la cache de mesos perquè rebuildAll()
+// Mutacions locals: cal tocar també les caches perquè rebuildAll()
 // reconstrueix ALL des d'allà.
 function removeLocal(id) {
   ALL = ALL.filter(l => l.id !== id);
-  for (const arr of MONTH_CACHE.values()) {
+  for (const arr of PART_CACHE.values()) {
     const i = arr.findIndex(l => l.id === id);
     if (i >= 0) arr.splice(i, 1);
   }
+  const x = EXTRA.findIndex(l => l.id === id);
+  if (x >= 0) EXTRA.splice(x, 1);
   hearts.delete(id);
 }
 function addLocal(l) {
   if (ALL.some(x => x.id === l.id)) return;
   ALL.unshift(l);
-  if (MANIFEST && MANIFEST.months.length) {
-    const arr = MONTH_CACHE.get(MANIFEST.months[0].key);
-    if (arr && !arr.some(x => x.id === l.id)) arr.unshift(l);
-  }
+  EXTRA.unshift(l);
 }
 
 async function reprocessLink(id) {
@@ -935,24 +1038,36 @@ function writeHearts(ids) {
     '; path=/; max-age=31536000; SameSite=Lax';
 }
 let hearts = new Set(readHearts());
-// Hi ha embeddings publicats? Si no, el cor no té efecte d'ordre: l'amaguem.
-// Els vectors viuen a data/emb/{mes}.json i només es baixen quan hi ha cors.
+// Hi ha embeddings publicats a alguna font seguida? Si no, el cor no té efecte
+// d'ordre: l'amaguem. Els vectors viuen a data/u/{font}/emb-{mes}-p{N}.json i
+// només es baixen quan hi ha cors.
 function embAvailable() {
-  return !STATIC_MODE && !!(MANIFEST && MANIFEST.months.some(m => m.emb));
+  return !STATIC_MODE && !!MANIFEST && followedUsers().some(u => u.emb);
 }
 
-// Baixa els embeddings dels mesos visibles (un fetch per mes, un sol cop).
-// No fa res sense cors: la majoria de visites no paguen aquest pes.
+// Baixa els embeddings dels mesos visibles de les fonts seguides (un fetch per
+// part, un sol cop). No fa res sense cors: la majoria de visites no el paguen.
 async function ensureEmb() {
   if (!embAvailable() || !hearts.size) return;
-  const pend = MANIFEST.months.slice(0, SHOWN).filter(m => m.emb && !EMB_LOADED.has(m.key));
-  await Promise.all(pend.map(async m => {
-    EMB_LOADED.add(m.key);
-    try {
-      const d = await fetchJson('data/emb/' + m.key + '.json');
-      for (const id in d) EMB.set(id, d[id]);
-    } catch (e) { EMB_LOADED.delete(m.key); }
-  }));
+  const keys = new Set(MONTHS.slice(0, SHOWN).map(m => m.key));
+  const jobs = [];
+  for (const u of followedUsers()) {
+    if (!u.emb) continue;
+    for (const m of u.months) {
+      const ck = u.dir + '|' + m.key;
+      if (!keys.has(m.key) || EMB_LOADED.has(ck)) continue;
+      EMB_LOADED.add(ck);
+      jobs.push((async () => {
+        try {
+          for (let p = 0; p < (m.parts || 1); p++) {
+            const d = await fetchJson('data/u/' + u.dir + '/emb-' + m.key + '-p' + p + '.json');
+            for (const id in d) EMB.set(id, d[id]);
+          }
+        } catch (e) { EMB_LOADED.delete(ck); }
+      })());
+    }
+  }
+  await Promise.all(jobs);
 }
 
 function toggleHeart(id) {
@@ -1213,22 +1328,35 @@ function render() {
   }
   renderPerso();
 
-  items.forEach(l => { grid.appendChild(buildCard(l)); });
+  // Render incremental: pintar milers de cards de cop crema CPU (i bateria als
+  // mòbils). Es pinten RENDER_CAP i s'estiren més amb el botó (o en fer scroll
+  // fins a ell, via IntersectionObserver).
+  const visible = items.slice(0, RENDER_CAP);
+  visible.forEach(l => { grid.appendChild(buildCard(l)); });
 
   if (!items.length) {
     const e = document.createElement('div');
     e.className = 'empty';
-    e.textContent = MANIFEST && SHOWN < MANIFEST.months.length
+    e.textContent = MONTHS.length && SHOWN < MONTHS.length
       ? 'Cap resultat amb aquests filtres en el període carregat.'
       : 'Cap resultat amb aquests filtres.';
     grid.appendChild(e);
   }
 
-  // Botó per estirar un mes més d'historial al final de la graella.
-  if (!STATIC_MODE && MANIFEST && SHOWN < MANIFEST.months.length) {
-    const next = MANIFEST.months[SHOWN];
-    const w = document.createElement('div');
-    w.className = 'load-more-wrap';
+  const w = document.createElement('div');
+  w.className = 'load-more-wrap';
+  if (items.length > visible.length) {
+    // Encara hi ha links carregats per pintar.
+    const b = document.createElement('button');
+    b.className = 'load-more';
+    b.textContent = '＋ Mostra\'n més (' + (items.length - visible.length) + ' pendents)';
+    b.onclick = () => { RENDER_CAP += CAP_STEP; render(); };
+    w.appendChild(b);
+    grid.appendChild(w);
+    observeMore(b);
+  } else if (!STATIC_MODE && MONTHS.length && SHOWN < MONTHS.length) {
+    // Tot el carregat és visible: oferir un mes més d'historial.
+    const next = MONTHS[SHOWN];
     const b = document.createElement('button');
     b.className = 'load-more';
     b.textContent = '⬇ Carrega ' + monthLabel(next.key) + ' · ' + next.count +
@@ -1240,24 +1368,20 @@ function render() {
 }
 
 // Vista d'una sola card via permalink (#id:xxx). Afegeix un enllaç a l'inici.
-// Si el link és d'un mes no carregat, es cerca cap enrere pels shards.
-const SINGLE_SEARCHED = new Set();
+// Si el link no és als mesos carregats, es baixa la seva fitxa data/i/{id}.json.
+const SINGLE_CACHE = new Map(); // id -> link | null (null = no existeix)
 function renderSingle(grid) {
-  const l = ALL.find(x => x.id === activeId);
+  const l = ALL.find(x => x.id === activeId) || SINGLE_CACHE.get(activeId) || null;
   if (l) {
     grid.appendChild(buildCard(l));
-  } else if (!STATIC_MODE && MANIFEST && SHOWN < MANIFEST.months.length && !SINGLE_SEARCHED.has(activeId)) {
-    SINGLE_SEARCHED.add(activeId);
+  } else if (!STATIC_MODE && !SINGLE_CACHE.has(activeId)) {
     const id = activeId;
-    grid.innerHTML = '<div class="empty">Cercant l\'enllaç…</div>';
+    grid.innerHTML = '<div class="empty">Carregant l\'enllaç…</div>';
     (async () => {
-      let upto = 0;
-      for (let i = SHOWN; i < MANIFEST.months.length; i++) {
-        const arr = await loadMonth(MANIFEST.months[i].key);
-        if (arr.some(x => x.id === id)) { upto = i + 1; break; }
-      }
-      if (activeId !== id) return; // l'usuari ha navegat mentre cercàvem
-      if (upto) await showMonths(upto, false); else render();
+      let link = null;
+      try { link = await fetchJson('data/i/' + id + '.json'); } catch (e) {}
+      SINGLE_CACHE.set(id, link && link.id ? link : null);
+      if (activeId === id) render();
     })();
   } else {
     grid.innerHTML = '<div class="empty">Aquest enllaç no existeix o s\'ha donat de baixa.</div>';
@@ -1359,7 +1483,8 @@ function renderPerso() {
 }
 
 function renderStats() {
-  const total = (!STATIC_MODE && MANIFEST) ? MANIFEST.total : ALL.length;
+  const flw = (!STATIC_MODE && MANIFEST) ? followedUsers() : [];
+  const total = flw.length ? flw.reduce((a, u) => a + u.total, 0) : ALL.length;
   const done = ALL.filter(l => l.status === 'done').length;
   const tags = new Set(); ALL.forEach(l => (l.tags||[]).forEach(t => tags.add(t)));
   const newCount = ALL.filter(isNew).length;
@@ -1368,14 +1493,20 @@ function renderStats() {
     `<span><b>${done}</b> processats</span>` +
     `<span id="tags-toggle" class="tags-toggle${filtersOpen ? ' on' : ''}" ` +
       `title="Mostra/amaga el llistat de tags"># <b>${tags.size}</b> tags</span>`;
+  // Fonts seguides; clicant s'obre el selector de fonts i categories.
+  if (flw.length) {
+    html += `<span id="follow-toggle" class="follow-toggle" ` +
+      `title="Fonts seguides: ${flw.map(u => '@' + u.name).join(', ')}. Clica per canviar-les.">` +
+      `👥 <b>${flw.length}</b> ${flw.length === 1 ? 'font' : 'fonts'}</span>`;
+  }
   if (newCount) {
     html += `<span id="new-toggle" class="new-toggle${onlyNew ? ' on' : ''}" ` +
       `title="Mostra només novetats">✨ <b>${newCount}</b> novetats</span>`;
   }
   // Fins a quin mes es veu l'historial; clicant es carrega un mes més.
-  if (!STATIC_MODE && MANIFEST && MANIFEST.months.length) {
-    const cur = MANIFEST.months[Math.min(SHOWN, MANIFEST.months.length) - 1];
-    const more = SHOWN < MANIFEST.months.length;
+  if (!STATIC_MODE && MONTHS.length) {
+    const cur = MONTHS[Math.min(SHOWN, MONTHS.length) - 1];
+    const more = SHOWN < MONTHS.length;
     html += `<span id="hist-toggle" class="hist-toggle${more ? '' : ' end'}" ` +
       `title="${more ? 'Historial visible. Clica per carregar un mes més' : 'Tot l\'historial és visible'}">` +
       `📅 fins <b>${monthLabel(cur.key)}</b>${more ? ' ＋' : ''}</span>`;
@@ -1386,7 +1517,9 @@ function renderStats() {
   const nt = $('new-toggle');
   if (nt) nt.onclick = () => { onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); };
   const ht = $('hist-toggle');
-  if (ht && MANIFEST && SHOWN < MANIFEST.months.length) ht.onclick = () => showMonths(SHOWN + 1);
+  if (ht && SHOWN < MONTHS.length) ht.onclick = () => showMonths(SHOWN + 1);
+  const ft = $('follow-toggle');
+  if (ft) ft.onclick = openFollowModal;
 }
 
 // ---- Menú (☰): cercador, tags, novetats, columnes, tema, accions API ----
@@ -1413,6 +1546,7 @@ function menuAction(act) {
     case 'new': onlyNew = !onlyNew; renderStats(); render(); updateMenuState(); break;
     case 'new-dec': shiftNew(-1); break;
     case 'new-inc': shiftNew(1); break;
+    case 'follow': openFollowModal(); break;
     case 'hist-more': showMonths(SHOWN + 1); break;
     case 'hist-less': showMonths(SHOWN - 1); break;
     case 'cols-dec': colsDec(); break;
@@ -1457,7 +1591,7 @@ function initMenu() {
     const it = e.target.closest('.menu-item'); if (!it) return;
     const act = it.dataset.act;
     // Les accions que obren un prompt/modal tanquen el menú; els toggles el deixen obert.
-    if (act === 'token' || act === 'admin' || act === 'add') close();
+    if (act === 'token' || act === 'admin' || act === 'add' || act === 'follow') close();
     menuAction(act);
   });
   document.addEventListener('click', (e) => { if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) close(); });
@@ -1486,46 +1620,216 @@ function monthLabel(key) {
 function readMonthsCookie() { const m = document.cookie.match(/(?:^|;\s*)clio_months=(\d+)/); return m ? parseInt(m[1], 10) : 0; }
 function writeMonthsCookie(n) { document.cookie = 'clio_months=' + n + '; path=/; max-age=31536000; SameSite=Lax'; }
 
-async function loadMonth(key) {
-  if (MONTH_CACHE.has(key)) return MONTH_CACHE.get(key);
-  let arr = [];
-  try { arr = await fetchJson('data/months/' + key + '.json'); } catch (e) {}
-  if (!Array.isArray(arr)) arr = [];
-  MONTH_CACHE.set(key, arr);
-  return arr;
+// ---- Fonts seguides (cookie clio_follow: {u:[usuaris], c:[categories]}) ----
+// null = defecte: la categoria marcada com a default al manifest, o totes les fonts.
+function readFollow() {
+  const m = document.cookie.match(/(?:^|;\s*)clio_follow=([^;]*)/);
+  if (!m) return null;
+  try {
+    const f = JSON.parse(decodeURIComponent(m[1]));
+    return (f && (Array.isArray(f.u) || Array.isArray(f.c))) ? { u: f.u || [], c: f.c || [] } : null;
+  } catch (e) { return null; }
+}
+function writeFollow(f) {
+  document.cookie = f
+    ? 'clio_follow=' + encodeURIComponent(JSON.stringify(f)) + '; path=/; max-age=31536000; SameSite=Lax'
+    : 'clio_follow=; path=/; max-age=0; SameSite=Lax';
+}
+let FOLLOW = readFollow();
+
+function catByName(n) { return ((MANIFEST && MANIFEST.categories) || []).find(c => c.name === n); }
+
+// Noms de les fonts seguides, resolts contra el manifest. Mai buit si hi ha
+// fonts: una selecció que ja no existeix cau al defecte (i el defecte, a tot).
+function followedNames() {
+  if (!MANIFEST) return new Set();
+  const all = MANIFEST.users.map(u => u.name);
+  let sel = new Set();
+  if (FOLLOW) {
+    (FOLLOW.u || []).forEach(n => sel.add(n));
+    (FOLLOW.c || []).forEach(cn => { const c = catByName(cn); if (c) c.users.forEach(n => sel.add(n)); });
+    sel = new Set([...sel].filter(n => all.includes(n)));
+  }
+  if (!sel.size) {
+    const def = (MANIFEST.categories || []).find(c => c.default);
+    (def ? def.users : all).forEach(n => sel.add(n));
+    sel = new Set([...sel].filter(n => all.includes(n)));
+    if (!sel.size) all.forEach(n => sel.add(n));
+  }
+  return sel;
+}
+function followedUsers() {
+  if (!MANIFEST) return [];
+  const s = followedNames();
+  return MANIFEST.users.filter(u => s.has(u.name));
 }
 
-// Reconstrueix ALL amb els SHOWN primers mesos, en ordre cronològic invers.
+// Línia temporal fusionada (mesos desc) de les fonts seguides.
+function computeMonths() {
+  const agg = new Map();
+  for (const u of followedUsers()) {
+    for (const m of u.months) agg.set(m.key, (agg.get(m.key) || 0) + m.count);
+  }
+  MONTHS = [...agg.entries()].map(([key, count]) => ({ key, count }))
+    .sort((a, b) => (a.key < b.key ? 1 : -1));
+}
+
+// Carrega totes les parts d'un mes per a cada font seguida que el tingui.
+async function loadMonth(key) {
+  const jobs = [];
+  for (const u of followedUsers()) {
+    const m = u.months.find(x => x.key === key);
+    if (!m) continue;
+    const ck = u.dir + '|' + key;
+    if (PART_CACHE.has(ck)) continue;
+    PART_CACHE.set(ck, []);
+    jobs.push((async () => {
+      try {
+        const parts = await Promise.all(Array.from({ length: m.parts || 1 },
+          (_, p) => fetchJson('data/u/' + u.dir + '/' + key + '-p' + p + '.json')));
+        PART_CACHE.set(ck, [].concat.apply([], parts));
+      } catch (e) { PART_CACHE.delete(ck); }
+    })());
+  }
+  await Promise.all(jobs);
+}
+
+// Reconstrueix ALL amb els SHOWN primers mesos de les fonts seguides.
+// Dedup per id: un link co-reportat apareix al shard de cada reporter.
 function rebuildAll() {
+  const seen = new Set();
   ALL = [];
-  for (const m of MANIFEST.months.slice(0, SHOWN)) {
-    ALL = ALL.concat(MONTH_CACHE.get(m.key) || []);
+  for (const l of EXTRA) { if (!seen.has(l.id)) { seen.add(l.id); ALL.push(l); } }
+  const keys = MONTHS.slice(0, SHOWN).map(m => m.key);
+  for (const u of followedUsers()) {
+    for (const k of keys) {
+      const arr = PART_CACHE.get(u.dir + '|' + k) || [];
+      for (const l of arr) { if (!seen.has(l.id)) { seen.add(l.id); ALL.push(l); } }
+    }
   }
   ALL.sort((a, b) => linkTime(b) - linkTime(a));
 }
 
 // Fixa el nombre de mesos visibles (clamp a [1, total]), carregant el que falti.
 async function showMonths(n, persist = true) {
-  if (STATIC_MODE || !MANIFEST || !MANIFEST.months.length) return;
-  n = Math.max(1, Math.min(n, MANIFEST.months.length));
+  if (STATIC_MODE || !MONTHS.length) return;
+  const grow = n > SHOWN;
+  n = Math.max(1, Math.min(n, MONTHS.length));
   SHOWN = n;
   if (persist) writeMonthsCookie(n);
-  await Promise.all(MANIFEST.months.slice(0, n).map(m => loadMonth(m.key)));
+  await Promise.all(MONTHS.slice(0, n).map(m => loadMonth(m.key)));
   rebuildAll();
   await ensureEmb();
+  // En estirar historial, deixar marge de render perquè el nou mes es vegi.
+  if (grow) RENDER_CAP += CAP_STEP;
   refreshHistItems();
   renderStats(); buildFilters(); render();
 }
 
-// Ítems del menú d'historial: només tenen sentit amb manifest i més d'un mes.
+// Re-aplica un canvi de fonts seguides: recalcula mesos i recarrega el que calgui.
+async function applyFollow() {
+  computeMonths();
+  resetCap();
+  const n = SHOWN || initialMonths();
+  SHOWN = 0; // força showMonths encara que n no canviï
+  await showMonths(n, false);
+}
+
+// Mesos inicials: cookie si n'hi ha; si no, els que calguin per a ~60 enllaços.
+function initialMonths() {
+  const c = readMonthsCookie();
+  if (c) return c;
+  let acc = 0, n = 0;
+  for (const m of MONTHS) { n++; acc += m.count; if (acc >= 60) break; }
+  return Math.max(n, 1);
+}
+
+// Ítems del menú de fonts/historial: només amb manifest (i >1 mes per l'historial).
 function refreshHistItems() {
+  const fol = document.querySelector('.menu-item[data-act="follow"]');
   const more = document.querySelector('.menu-item[data-act="hist-more"]');
   const less = document.querySelector('.menu-item[data-act="hist-less"]');
   const sep = $('menu-hist-sep');
-  const ok = !STATIC_MODE && !!MANIFEST && MANIFEST.months.length > 1;
-  if (sep) sep.hidden = !ok;
-  if (more) { more.hidden = !ok; more.disabled = ok && SHOWN >= MANIFEST.months.length; }
+  const base = !STATIC_MODE && !!MANIFEST;
+  const ok = base && MONTHS.length > 1;
+  if (fol) fol.hidden = !base;
+  if (sep) sep.hidden = !base;
+  if (more) { more.hidden = !ok; more.disabled = ok && SHOWN >= MONTHS.length; }
   if (less) { less.hidden = !ok; less.disabled = ok && SHOWN <= 1; }
+}
+
+// ---- Modal de fonts i categories ----
+function openFollowModal() {
+  if (STATIC_MODE || !MANIFEST) return;
+  const cats = MANIFEST.categories || [];
+  const selC = new Set(FOLLOW ? (FOLLOW.c || []) : cats.filter(c => c.default).map(c => c.name));
+  const selU = new Set(FOLLOW ? (FOLLOW.u || []) : []);
+  const catTotal = (c) => c.users.reduce((a, n) => {
+    const u = MANIFEST.users.find(x => x.name === n);
+    return a + (u ? u.total : 0);
+  }, 0);
+
+  const ov = document.createElement('div');
+  ov.className = 'modal-ov';
+  const catRows = cats.map(c =>
+    `<label class="flw-row"><input type="checkbox" data-cat="${esc(c.name)}"${selC.has(c.name) ? ' checked' : ''}>
+      <span>${esc(c.name)}${c.default ? ' <span class="you">(defecte)</span>' : ''}</span>
+      <span class="flw-n" title="${esc(c.users.join(', '))}">${c.users.length} fonts · ${catTotal(c)}</span></label>`).join('');
+  const userRows = MANIFEST.users.map(u =>
+    `<label class="flw-row"><input type="checkbox" data-user="${esc(u.name)}"${selU.has(u.name) ? ' checked' : ''}>
+      <span>@${esc(u.name)}</span>${u.role === 'npc' ? ' <span class="rolebadge user">npc</span>' : ''}
+      <span class="flw-n">${u.total}</span></label>`).join('');
+  ov.innerHTML = `<div class="modal">
+    <div class="modal-head"><h3>👥 Fonts que segueixes</h3><button class="modal-x" title="Tanca">✕</button></div>
+    <div class="modal-body">
+      ${cats.length ? `<div class="flw-sec"><h4>Categories</h4>${catRows}</div>` : ''}
+      <div class="flw-sec"><h4>Fonts</h4>${userRows}</div>
+      <div class="flw-foot">
+        <span class="flw-hint">Sense selecció es mostra ${cats.some(c => c.default) ? 'la categoria per defecte' : 'tot'}.</span>
+        <button id="flw-reset" class="act">Per defecte</button>
+        <button id="flw-save" class="act">✓ Desa</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const close = () => { ov.remove(); document.removeEventListener('keydown', esc3); };
+  function esc3(e) { if (e.key === 'Escape') close(); }
+  ov.querySelector('.modal-x').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  document.addEventListener('keydown', esc3);
+
+  ov.querySelector('#flw-reset').onclick = async () => {
+    FOLLOW = null; writeFollow(null);
+    close(); await applyFollow();
+    toast('Fonts restaurades al defecte.', 'ok');
+  };
+  ov.querySelector('#flw-save').onclick = async () => {
+    const u = [...ov.querySelectorAll('input[data-user]:checked')].map(i => i.dataset.user);
+    const c = [...ov.querySelectorAll('input[data-cat]:checked')].map(i => i.dataset.cat);
+    FOLLOW = (u.length || c.length) ? { u, c } : null;
+    writeFollow(FOLLOW);
+    close(); await applyFollow();
+    toast('Fonts actualitzades: ' + followedUsers().length + ' seguides.', 'ok');
+  };
+}
+
+// ---- Render incremental ----
+// Pintar tot el que hi ha carregat de cop és el que crema CPU al mòbil: es
+// pinta a trams de CAP_STEP i s'estira amb el botó o fent scroll fins a ell.
+const CAP_STEP = 60;
+let RENDER_CAP = CAP_STEP;
+function resetCap() { RENDER_CAP = CAP_STEP; }
+let moreObserver = null;
+function observeMore(btn) {
+  if (!('IntersectionObserver' in window)) return;
+  if (!moreObserver) {
+    moreObserver = new IntersectionObserver(entries => {
+      for (const en of entries) {
+        if (en.isIntersecting) { moreObserver.unobserve(en.target); en.target.click(); }
+      }
+    }, { rootMargin: '600px' });
+  }
+  moreObserver.observe(btn);
 }
 
 // Fallback file:// (o manifest absent): injecta data/links.js amb tot l'índex
@@ -1544,7 +1848,7 @@ async function loadData() {
   if (location.protocol !== 'file:') {
     try {
       const m = await fetchJson('data/manifest.json');
-      if (m && Array.isArray(m.months)) { MANIFEST = m; return; }
+      if (m && Array.isArray(m.users)) { MANIFEST = m; return; }
     } catch (e) {}
   }
   STATIC_MODE = true;
@@ -1562,26 +1866,18 @@ async function loadData() {
   await loadData();
   applyHash();
   if (MANIFEST) {
-    // Mesos inicials: cookie si n'hi ha; si no, els que calguin per arribar
-    // a ~60 enllaços (mínim 1 mes).
-    let n = readMonthsCookie();
-    if (!n) {
-      let acc = 0;
-      n = 0;
-      for (const m of MANIFEST.months) { n++; acc += m.count; if (acc >= 60) break; }
-      n = Math.max(n, 1);
-    }
-    await showMonths(n, false);
+    computeMonths();
+    await showMonths(initialMonths(), false);
   } else {
     renderStats();
     buildFilters();
     render();
   }
   refreshHistItems();
-  window.addEventListener('hashchange', onHashChange);
-  $('search').addEventListener('input', render);
-  $('type-filter').addEventListener('change', render);
-  $('sent-filter').addEventListener('change', render);
+  window.addEventListener('hashchange', () => { resetCap(); onHashChange(); });
+  $('search').addEventListener('input', () => { resetCap(); render(); });
+  $('type-filter').addEventListener('change', () => { resetCap(); render(); });
+  $('sent-filter').addEventListener('change', () => { resetCap(); render(); });
   // Marca aquesta visita: els links nous deixaran de ser-ho a la pròxima.
   writeLastVisit(Date.now());
 })();

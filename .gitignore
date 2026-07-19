@@ -3,3 +3,4 @@
 /public
 .env
 /.fastembed_cache
+/.claude/
