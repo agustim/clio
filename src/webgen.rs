@@ -382,7 +382,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
 const STYLE_CSS: &str = r#":root {
   --radius: 14px;
-  --maxw: 1180px;
+  --maxw: none;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 6px 24px rgba(0,0,0,.08);
   --transition: .18s ease;
 }
@@ -716,12 +716,20 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .permalink { flex: none; text-decoration: none; font-size: .82rem; line-height: 1; opacity: .45; transition: opacity var(--transition); }
 .permalink:hover { opacity: 1; }
 
-/* Vista permalink: una sola card centrada, sense filtres ni estadístiques. */
+/* Vista permalink: una sola card a tot l'ample, sense filtres ni estadístiques. */
 body.single-view #controls,
 body.single-view #stats,
 body.single-view #perso,
 body.single-view #filters { display: none; }
-body.single-view .grid { display: block; max-width: 640px; margin: 0 auto; }
+body.single-view .grid { display: block; }
+/* En permalink es veuen info + detalls + anàlisi a la vegada, apilats. */
+body.single-view .card-tabs { display: none; }
+body.single-view .card-panels { display: flex; flex-direction: column; gap: 1.4rem; }
+body.single-view .card-panels .panel[hidden] { display: block; }
+body.single-view .card-panels .panel { border-top: 1px dashed var(--border); padding-top: .7rem; }
+body.single-view .card-panels .panel:first-child { border-top: none; padding-top: 0; }
+body.single-view .card-panels .panel[data-panel="details"] { order: 2; }
+body.single-view .card-panels .panel[data-panel="deep"] { order: 3; }
 .home-link { text-align: center; padding: 2rem 1rem 1rem; }
 .home-link a { color: var(--accent); text-decoration: none; font-size: .9rem; }
 .home-link a:hover { text-decoration: underline; }
@@ -1373,7 +1381,7 @@ const SINGLE_CACHE = new Map(); // id -> link | null (null = no existeix)
 function renderSingle(grid) {
   const l = ALL.find(x => x.id === activeId) || SINGLE_CACHE.get(activeId) || null;
   if (l) {
-    grid.appendChild(buildCard(l));
+    grid.appendChild(buildCard(l, true));
   } else if (!STATIC_MODE && !SINGLE_CACHE.has(activeId)) {
     const id = activeId;
     grid.innerHTML = '<div class="empty">Carregant l\'enllaç…</div>';
@@ -1394,7 +1402,8 @@ function renderSingle(grid) {
 }
 
 // Construeix l'element <article> d'una card. Reutilitzat per la graella i el permalink.
-function buildCard(l) {
+// `single`: vista permalink — mostra info+anàlisi+detalls a la vegada, sense tabs.
+function buildCard(l, single) {
     const reps = l.reporters || [];
     const type = esc(l.link_type || 'other');
     const sent = esc(l.sentiment || 'neutral');
@@ -1456,6 +1465,11 @@ function buildCard(l) {
         if (box) loadDeep(box);
       }
     }));
+    // Vista permalink: info + anàlisi + detalls oberts alhora (sense tabs).
+    if (single) {
+      const box = card.querySelector('.panel[data-panel="deep"] .deep-md');
+      if (box) loadDeep(box);
+    }
     const hb = card.querySelector('.heart');
     if (hb) hb.onclick = async () => { toggleHeart(l.id); await ensureEmb(); render(); };
     const rf = card.querySelector('.act-refresh');
