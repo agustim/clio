@@ -509,6 +509,7 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
   transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
 }
 .card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow); }
+.card.is-expanded { grid-column: 1 / -1; }
 .card-top { display: flex; align-items: center; justify-content: center; gap: .5rem; }
 .card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em; text-align: center;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -546,6 +547,7 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .tags { display: flex; flex-wrap: wrap; gap: .3rem; }
 .meta { display: flex; align-items: center; justify-content: space-between; font-size: .8rem; color: var(--muted); margin-top: auto; padding-top: .3rem; border-top: 1px solid var(--border); }
 .sent { display: inline-flex; align-items: center; gap: .35rem; font-weight: 500; }
+.collected { white-space: nowrap; }
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .sent.positive { color: var(--pos); } .sent.positive .dot { background: var(--pos); }
 .sent.neutral  { color: var(--neu); } .sent.neutral  .dot { background: var(--neu); }
@@ -781,6 +783,10 @@ function writeLastVisit(ms) {
 }
 const LAST_VISIT = readLastVisit();
 function linkTime(l) { const t = Date.parse(l.created_at); return isNaN(t) ? 0 : t; }
+function collectedDate(l) {
+  const t = linkTime(l);
+  return t ? new Date(t).toLocaleDateString('ca-ES', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '—';
+}
 // Desplaçament del llindar de novetats en dies (persistit). Negatiu = enrere
 // (mostra'n més, també les més antigues); positiu = endavant (mostra'n menys).
 function readNewOffset() { const m = document.cookie.match(/(?:^|;\s*)clio_newoff=(-?\d+)/); return m ? parseInt(m[1], 10) : 0; }
@@ -1438,6 +1444,7 @@ function buildCard(l, single) {
           <div class="tags">${tags}</div>
           <div class="meta">
             <span class="sent ${sent}"><span class="dot"></span>${SENT_LABEL[sent] || sent}</span>
+            <span class="collected" title="Data de recollida">📅 ${collectedDate(l)}</span>
             <span class="reporters" title="Qui ha enviat aquest enllaç">${users || '👤 —'}</span>
           </div>
         </div>
@@ -1460,6 +1467,7 @@ function buildCard(l, single) {
       const name = t.dataset.panel;
       tabs.forEach(x => x.classList.toggle('on', x === t));
       panels.forEach(p => p.hidden = p.dataset.panel !== name);
+      card.classList.toggle('is-expanded', name === 'deep');
       if (name === 'deep') {
         const box = card.querySelector('.panel[data-panel="deep"] .deep-md');
         if (box) loadDeep(box);
