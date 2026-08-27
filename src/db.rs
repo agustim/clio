@@ -67,6 +67,7 @@ impl Db {
             ("007_blocklist", include_str!("../migrations/007_blocklist.sql")),
             ("008_fail_counts", include_str!("../migrations/008_fail_counts.sql")),
             ("009_overlay", include_str!("../migrations/009_overlay.sql")),
+            ("010_image_file", include_str!("../migrations/010_image_file.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -487,6 +488,7 @@ impl Db {
             deep_summary,
             code_stats,
             image_url: r.get("image_url"),
+            image_file: r.get("image_file"),
             embedding,
             embed_scale,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
@@ -494,7 +496,7 @@ impl Db {
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, embedding, embed_scale, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, image_file, embedding, embed_scale, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -635,6 +637,18 @@ impl Db {
     pub async fn set_link_image(&self, link_id: Uuid, image: Option<&str>) -> Result<()> {
         sqlx::query("UPDATE links SET image_url = ?, updated_at = ? WHERE id = ?")
             .bind(image)
+            .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Desvia la còpia LOCAL de la imatge (nom de fitxer dins d'IMAGES_DIR).
+    /// `None` ho neteja (es torna al proxy remot).
+    pub async fn set_link_image_file(&self, link_id: Uuid, file: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE links SET image_file = ?, updated_at = ? WHERE id = ?")
+            .bind(file)
             .bind(now_str())
             .bind(link_id.to_string())
             .execute(&self.pool)

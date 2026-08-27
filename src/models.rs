@@ -116,6 +116,11 @@ pub struct Link {
     /// (evita hotlink i amaga el referrer). Buit = sense imatge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// Còpia local de la imatge: nom de fitxer dins d'IMAGES_DIR (p.ex.
+    /// `<link_id>.jpg`), baixada mentre s'analitzava la cua. Si hi és,
+    /// l'overlay la serveix des de /imgout/{id} en lloc del proxy remot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_file: Option<String>,
     /// Embedding quantitzat (int8) per al ranking personalitzat a la web.
     /// `e` = vector i8; `s` = factor de dequantització (f32 ≈ e[i] * s).
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]

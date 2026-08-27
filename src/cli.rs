@@ -185,10 +185,15 @@ pub async fn run(
             Ok(())
         }
         Cmd::Images { limit } => {
+            // 1) Backfill: re-baixa pàgines sense og:image per obtenir-ne la URL.
             let (updated, checked) = state.backfill_images(limit).await?;
+            // 2) Baixa i desa LOCALMENT (IMAGES_DIR) les imatges ja conegudes
+            //    que encara no tenen còpia local (per a l'overlay sin demores).
+            let (cached, cache_checked) = state.cache_images(limit).await?;
             println!(
-                "Imatges obtingudes: {updated}/{checked} (links sense imatge analitzats). \
-                 Regenera la web o consulta /overlay per veure-les."
+                "Imatges: {updated} og:image noves ({checked} sense imatge analitzades); \
+                 {cached} còpies locals baixades ({cache_checked} comprovades). \
+                 Els links analitzats des d'ara baixen la imatge automàticament."
             );
             Ok(())
         }

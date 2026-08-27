@@ -298,6 +298,14 @@ pub async fn process_link(
         Ok((title, link_type, analysis, image)) => {
             db.update_link_analysis(link_id, title.as_deref(), link_type, &analysis, image.as_deref())
                 .await?;
+            // Baixa la imatge d'acompanyament i la desa LOCALMENT (data/images)
+            // perquè l'overlay no depengui del servidor original a l'aire.
+            // Best-effort: si falla, l'overlay farà servir el proxy remot /img.
+            if let Some(img_url) = image {
+                if let Err(e) = cache_link_image(db, cfg, http, link_id, &img_url).await {
+                    tracing::warn!(%link_id, error = %e, "no s'ha pogut desar la imatge localment (es farà servir el proxy /img)");
+                }
+            }
             // Embedding semàntic per al ranking personalitzat (best-effort).
             if let Some(emb) = embedder {
                 let text = embed_source(title.as_deref(), &analysis);
@@ -314,6 +322,46 @@ pub async fn process_link(
             Err(e)
         }
     }
+}
+
+/// Extensió de fitxer per a una imatge, a partir del seu `Content-Type`.
+/// Només accepta tipus d'imatge; `None` per a qualsevol altra cosa (per
+/// no desar HTML/massacres que un servidor pugui enviar amb status 200).
+fn image_ext(ct: &str) -> Option<&'static str> {
+    let base = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match base.as_str() {
+        "image/jpeg" => Some(".jpg"),
+        "image/png" => Some(".png"),
+        "image/gif" => Some(".gif"),
+        "image/webp" => Some(".webp"),
+        "image/avif" => Some(".avif"),
+        "image/svg+xml" => Some(".svg"),
+        _ => None,
+    }
+}
+
+/// Baixa la imatge d'acompanyament d'un link i la desa a `cfg.images_dir`.
+/// Retorna el nom de fitxer desat (p.ex. `<id>.jpg`). Best-effort: qualsevol
+/// error (SSRF, xarxa, massa gran, tipus no-imatge) es propaga i el cridant
+/// decideix caure al proxy remot.
+pub(crate) async fn cache_link_image(
+    db: &Db,
+    cfg: &Config,
+    http: &reqwest::Client,
+    link_id: Uuid,
+    image_url: &str,
+) -> Result<Option<String>> {
+    let (bytes, ct) = crate::overlay::fetch_image(http, image_url).await?;
+    let Some(ext) = image_ext(&ct) else {
+        return Ok(None); // no és una imatge; deixem que faci servir el proxy
+    };
+    let name = format!("{link_id}{ext}");
+    let dir = std::path::Path::new(&cfg.images_dir);
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(&name), &bytes)?;
+    db.set_link_image_file(link_id, Some(&name)).await?;
+    tracing::info!(%link_id, %image_url, bytes = bytes.len(), "imatge desada localment: {name}");
+    Ok(Some(name))
 }
 
 async fn run_inner(
@@ -446,5 +494,20 @@ mod tests {
         assert!((deq[0] - 0.6).abs() < 0.02);
         assert!((deq[1] - 0.8).abs() < 0.02);
         assert!(deq[2].abs() < 0.02);
+    }
+
+    #[test]
+    fn image_ext_maps_known_types_and_rejects_others() {
+        assert_eq!(image_ext("image/jpeg"), Some(".jpg"));
+        assert_eq!(image_ext("image/png"), Some(".png"));
+        assert_eq!(image_ext("image/webp"), Some(".webp"));
+        // Suffix del paràmetre charset s'ignora.
+        assert_eq!(image_ext("image/png; charset=binary"), Some(".png"));
+        // Majúscules normalitzades.
+        assert_eq!(image_ext("IMAGE/PNG"), Some(".png"));
+        // No-imatges -> None (no desar HTML/JSON amb status 200).
+        assert_eq!(image_ext("text/html"), None);
+        assert_eq!(image_ext(""), None);
+        assert_eq!(image_ext("application/octet-stream"), None);
     }
 }

@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlay", get(overlay_page))
         .route("/overlay/ticker.json", get(overlay_ticker))
         .route("/img", get(img_proxy))
+        .route("/imgout/:id", get(img_local))
         // Tot el que no és /api cau a la web estàtica.
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
@@ -373,6 +374,46 @@ async fn img_proxy(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, ct),
+            (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Serveix la còpia LOCAL d'una imatge (/imgout/{id}), desada a IMAGES_DIR
+/// mentre s'analitzava la cua. Si no n'hi ha, 404 → la card cau al proxy /img.
+async fn img_local(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    let link = state.db.link_by_id(uuid).await?.ok_or(AppError::NotFound)?;
+    let Some(name) = link.image_file else {
+        return Err(AppError::NotFound); // sense còpia local → el client usa /img
+    };
+    // Nom de fitxer segur: un sol component (basename), sense ".." ni "/".
+    if name.contains('/') || name.contains('\\') || name == ".." || name.contains(".. ") {
+        return Err(AppError::NotFound);
+    }
+    if std::path::Path::new(&name).file_name().and_then(|f| f.to_str()) != Some(name.as_str()) {
+        return Err(AppError::NotFound);
+    }
+    let path = std::path::Path::new(&state.cfg.images_dir).join(&name);
+    let bytes = std::fs::read(&path).map_err(|_| AppError::NotFound)?;
+    let ct = match std::path::Path::new(&name).extension().and_then(|e| e.to_str()) {
+        Some("jpg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ct.to_string()),
             (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
         ],
         bytes,

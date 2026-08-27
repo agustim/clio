@@ -67,8 +67,18 @@ fn item(l: &Link) -> Value {
         "link_type": l.link_type.as_str(),
         "sentiment": l.sentiment.as_str(),
         "source": source,
-        "image": l.image_url.as_deref().map(proxy_url),
+        "image": image_for(l),
     })
+}
+
+/// URL de la imatge d'una card: la còpia LOCAL (/imgout/{id}) si n'hi ha
+/// (baixada en analitzar la cua) i, si no, el proxy remot (/img?u=...).
+fn image_for(l: &Link) -> Option<String> {
+    if l.image_file.is_some() {
+        Some(format!("/imgout/{}", l.id))
+    } else {
+        l.image_url.as_deref().map(proxy_url)
+    }
 }
 
 /// Neteja lleugera del text del LLM (markdown -> prosa per a l'overlay): treu
@@ -495,5 +505,44 @@ mod tests {
     #[test]
     fn percent_encode_reserved() {
         assert_eq!(percent_encode("https://x.com/a b?c=d&e=f"), "https%3A%2F%2Fx.com%2Fa%20b%3Fc%3Dd%26e%3Df");
+    }
+
+    /// La card prefereix la còpia LOCAL (/imgout/{id}) i cau al proxy remot si
+    /// no hi ha imatge local.
+    #[test]
+    fn image_prefers_local_copy() {
+        use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment};
+        let mk = |image_url: Option<&str>, image_file: Option<&str>| Link {
+            id: uuid::Uuid::new_v4(),
+            url: "https://example.com/noticia".into(),
+            title: Some("títol".into()),
+            summary: Some("resum".into()),
+            link_type: LinkType::Article,
+            tags: vec![],
+            sentiment: Sentiment::Neutral,
+            status: LinkStatus::Done,
+            co_reporters: vec![],
+            reporters: vec![],
+            deep_status: DeepStatus::Done,
+            deep_summary: Some("anàlisi".into()),
+            code_stats: None,
+            image_url: image_url.map(String::from),
+            image_file: image_file.map(String::from),
+            embedding: None,
+            embed_scale: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let with_local = mk(Some("https://cdn/x.jpg"), Some("abc.jpg"));
+        assert_eq!(
+            image_for(&with_local),
+            Some(format!("/imgout/{}", with_local.id))
+        );
+        let only_remote = mk(Some("https://cdn/x.jpg"), None);
+        assert_eq!(
+            image_for(&only_remote),
+            Some("/img?u=https%3A%2F%2Fcdn%2Fx.jpg".into())
+        );
+        assert_eq!(image_for(&mk(None, None)), None);
     }
 }

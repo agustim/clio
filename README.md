@@ -195,19 +195,25 @@ inferior** amb el *news crawl* de titulars.
 
 - `/overlay` — l'escena HTML (font de navegador per a OBS, o per al mode headless).
 - `/overlay/ticker.json` — les últimes N notícies processades (`OVERLAY_MAX_ITEMS`, per
-  defecte 50), amb `image` proxied via `/img`.
-- `/img?u=...` — proxy d'imatges (anti-hotlink, amaga el referrer, guardes SSRF).
+  defecte 50), amb `image` apuntant a la còpia local o al proxy `/img`.
+- `/imgout/{id}` — serveix la **còpia local** de la imatge (desada a `IMAGES_DIR`,
+  per defecte `data/images/`).
+- `/img?u=...` — proxy d'imatges remot (anti-hotlink, amaga el referrer, guardes SSRF).
 
 Comportament de l'escena: la graella mostra `OVERLAY_CARDS` cards i **salta de CARDS en
 CARDS** a cada canvi (`OVERLAY_ROTATE_SECS`) — totes canvien a l'hora —; cada card mostra
 fins a `OVERLAY_TEXT_LINES` línies (per defecte 9) de l'anàlisi del LLM, donant
 prioritat al text i limitant l'alçada de la imatge (`height: clamp(110px, 17vh, 180px)`).
 
-Les imatges s'extreuen del `og:image` (o primera imatge) de cada article a la 1a passa.
-Backfill per als links ja processats, **sense re-analitzar res**:
+Les imatges s'extreuen del `og:image` (o primera imatge) de cada article a la 1a passa i,
+**en analitzar la cua, es baixen i es desen localment** a `IMAGES_DIR` com a
+`<link_id>.<ext>`: l'overlay les serveix des de `/imgout/{id}` (ràpid, sense dependre del
+servidor original i resistent a hotlink/imatges mortes). Si el download falla o no és una
+imatge, es torna al proxy remot `/img`. Backfill per als links ja processats, **sense
+re-analitzar res**:
 
 ```bash
-linkanalyzer images --limit 200   # extreu og:image per als més recents que en manquin
+linkanalyzer images --limit 200   # 1) extreu og:image pels que en manquin; 2) baixa còpies locals
 ```
 
 > Política mixta recomanada: `og:image` de l'article **sempre amb crèdit** (`📷 domini` a

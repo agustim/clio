@@ -235,6 +235,35 @@ impl AppState {
         Ok((updated, checked))
     }
 
+    /// Baixa i desa LOCALMENT (IMAGES_DIR) la imatge dels links que ja tenen
+    /// `image_url` però encara no `image_file` (p.ex. els processats abans
+    /// d'aquesta funció). Retorna (desades, links comprovats).
+    pub async fn cache_images(&self, limit: i64) -> Result<(usize, usize)> {
+        let ids = self.db.all_link_ids(limit).await?;
+        let (mut cached, mut checked) = (0usize, 0usize);
+        for id in ids {
+            let Ok(Some(l)) = self.db.link_by_id(id).await else {
+                continue;
+            };
+            if l.image_file.is_some() {
+                continue; // ja en té còpia local
+            }
+            let Some(url) = l.image_url else {
+                continue; // tampoc hi ha imatge remota
+            };
+            checked += 1;
+            match crate::pipeline::cache_link_image(&self.db, &self.cfg, &self.http, id, &url).await {
+                Ok(Some(_)) => {
+                    tracing::info!(%id, %url, "còpia local d'imatge generada");
+                    cached += 1;
+                }
+                Ok(None) => {} // no era una imatge
+                Err(e) => tracing::warn!(%id, error = %e, "cache imatge fallit"),
+            }
+        }
+        Ok((cached, checked))
+    }
+
     /// Processament complet inline (shallow + deep) — usat per la CLI, que no
     /// té workers en marxa. Espera fins acabar.
     pub async fn process_full(&self, link_id: Uuid) -> Result<()> {

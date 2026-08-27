@@ -72,6 +72,11 @@ pub struct Config {
     /// Buit = sense notificacions. Pot ser negatiu (grups).
     pub admin_chat_id: Option<i64>,
     pub public_dir: String,
+    /// Carpeta on es desen localment les imatges d'acompanyament baixades
+    /// mentre s'analitza la cua (p.ex. `data/images`). Se serveixen a
+    /// `/imgout/{id}`; si no hi ha còpia local, l'overlay fa servir el proxy
+    /// remot `/img?u=`.
+    pub images_dir: String,
     pub max_link_size_bytes: usize,
     /// Límit de paraules per a l'anàlisi profunda (deep) i fallbacks d'article.
     pub summary_max_words: usize,
@@ -207,6 +212,7 @@ impl Config {
             telegram_bot_token: opt("TELEGRAM_BOT_TOKEN"),
             admin_chat_id: opt("ADMIN_CHAT_ID").and_then(|s| s.parse().ok()),
             public_dir: get("PUBLIC_DIR", "public"),
+            images_dir: get("IMAGES_DIR", "data/images"),
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
             summary_max_chars,
