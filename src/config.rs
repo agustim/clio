@@ -120,6 +120,9 @@ pub struct Config {
     /// TimeZone (IANA, p.ex. "Europe/Andorra") per a les dates/hores de les
     /// notícies i el rellotge de l'escena. Buit = hora local del navegador.
     pub overlay_timezone: Option<String>,
+    /// Finestra (minuts) durant la qual una notícia es marca com a NOVA a
+    /// l'overlay (marc vermell + cintó). 0 = desactiva la marca.
+    pub overlay_new_minutes: u64,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -178,6 +181,9 @@ impl Config {
             .parse()
             .map_err(|_| AppError::Config("OVERLAY_TEXT_LINES invalid".into()))?;
         let overlay_timezone = opt("OVERLAY_TIMEZONE");
+        let overlay_new_minutes: u64 = get("OVERLAY_NEW_MINUTES", "30")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_NEW_MINUTES invalid".into()))?;
 
         // LLM de chat.
         let llm_provider = get("LLM_PROVIDER", "none");
@@ -240,6 +246,7 @@ impl Config {
             overlay_cards,
             overlay_text_lines,
             overlay_timezone,
+            overlay_new_minutes,
         })
     }
 }

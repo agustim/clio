@@ -242,6 +242,8 @@ pub fn overlay_html(cfg: &Config) -> String {
         .replace("{{ROTATE}}", &cfg.overlay_rotate_secs.to_string())
         .replace("{{CARDS}}", &cfg.overlay_cards.max(1).to_string())
         .replace("{{LINES}}", &cfg.overlay_text_lines.max(1).to_string())
+        // Finestra (minuts) per marcar una notícia com a NOVA; 0 = desactivada.
+        .replace("{{NEW_MIN}}", &cfg.overlay_new_minutes.to_string())
         // TimeZone IANA (JSON-quoted) per a les hores de l'escena; "" = hora local.
         .replace(
             "{{TIMEZONE}}",
@@ -414,8 +416,10 @@ const CARDS   = Math.max(1, parseInt({{CARDS}}, 10) || 4);
 // local del navegador que emet el stream.
 const TZ = {{TIMEZONE}};
 const TZ_OPT = TZ ? { timeZone: TZ } : {};
-// Una notícia es considera NOVA durant els primers N minuts des de la publicació.
-const NEW_MS = 30 * 60 * 1000; // 30 minuts
+// Una notícia es considera NOVA durant els primers N minuts des de la publicació;
+// la finestra és configurable (OVERLAY_NEW_MINUTES, en minuts; 0 = desactivada).
+const NEW_MIN = Math.max(0, {{NEW_MIN}});
+const NEW_MS = NEW_MIN * 60 * 1000;
 
 let ITEMS = [];
 let idx = 0;
@@ -574,9 +578,13 @@ mod tests {
                 "les hores respecten la TimeZone configurada");
         assert!(OVERLAY_HTML.contains("{{TIMEZONE}}"),
                 "la TimeZone s'injecta des de config");
-        // Notícies recents (< 30 min) marcades com a NOVA amb marc/cintó.
+        // Notícies recents (finestra configurable) marcades com a NOVA amb marc/cintó.
         assert!(OVERLAY_HTML.contains("NEW_MS"),
-                "hi ha una finestra de 'nova' (30 min)");
+                "hi ha una finestra de 'nova'");
+        assert!(OVERLAY_HTML.contains("{{NEW_MIN}}"),
+                "la finestra de 'nova' s'injecta des de config (minuts)");
+        assert!(OVERLAY_HTML.contains("Math.max(0, {{NEW_MIN}})"),
+                "0 = marca de nova desactivada");
         assert!(OVERLAY_HTML.contains("isNew(l)"),
                 "card i crawl marquen la notícia nova");
         assert!(OVERLAY_HTML.contains("badge-new") && OVERLAY_HTML.contains("card.new"),
@@ -615,23 +623,34 @@ mod tests {
         assert_eq!(v["link_type"], "article");
     }
 
-    /// `overlay_html` injecta la TimeZone configurada al JS ("" si va buida).
+    /// `overlay_html` injecta la TimeZone i la finestra de "nova" al JS.
     #[test]
-    fn overlay_html_injects_timezone() {
+    fn overlay_html_injects_config_constants() {
         std::env::remove_var("OVERLAY_TIMEZONE");
+        std::env::remove_var("OVERLAY_NEW_MINUTES");
         let html = overlay_html(&Config::from_env().unwrap());
         assert!(
             html.contains("const TZ = \"\";"),
             "sense TimeZone la constant queda buida"
         );
+        assert!(
+            html.contains("const NEW_MIN = Math.max(0, 30);"),
+            "per defecte la finestra de nova és 30 minuts"
+        );
 
         std::env::set_var("OVERLAY_TIMEZONE", "Europe/Andorra");
+        std::env::set_var("OVERLAY_NEW_MINUTES", "15");
         let html = overlay_html(&Config::from_env().unwrap());
         assert!(
             html.contains("const TZ = \"Europe/Andorra\";"),
             "la TimeZone surt JSON-quoted al JS"
         );
+        assert!(
+            html.contains("const NEW_MIN = Math.max(0, 15);"),
+            "la finestra de nova es fa configurable (15 minuts)"
+        );
         std::env::remove_var("OVERLAY_TIMEZONE");
+        std::env::remove_var("OVERLAY_NEW_MINUTES");
     }
 
     /// Percent-encoding per al proxy: els caràcters reservats van a %XX.

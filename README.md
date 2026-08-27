@@ -210,9 +210,9 @@ prioritat al text i limitant l'alçada de la imatge (`height: clamp(110px, 17vh,
 
 Les **hores/data de les notícies i el rellotge** es mostren a la **TimeZone configurable**
 `OVERLAY_TIMEZONE` (IANA, p.ex. `Europe/Andorra`); si va buida s'usa l'hora local del
-navegador que emet el stream. Les notícies publicades fa menys de 30 minuts es marquen
-com a **NOU**: la card rep un **marc vermell** amb pols suau i un cintó `● NOU`, i al
-*news crawl* apareix la mateixa etiqueta.
+navegador que emet el stream. Les notícies publicades durant la **finestra `OVERLAY_NEW_MINUTES`**
+(per defecte 30 minuts; `0` = desactiva) es marquen com a **NOU**: la card rep un **marc
+vermell** amb pols suau i un cintó `● NOU`, i al *news crawl* apareix la mateixa etiqueta.
 
 Les imatges s'extreuen del `og:image` (o primera imatge) de cada article a la 1a passa i,
 **en analitzar la cua, es baixen i es desen localment** a `IMAGES_DIR` com a
