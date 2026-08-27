@@ -37,6 +37,13 @@ pub enum Cmd {
     Generate,
     /// Genera embeddings per als links que en manquin (backfill, requereix LLM)
     Reindex,
+    /// Backfill d'imatges (og:image / primera imatge) per als links processats
+    /// que en manquin. Re-baixa la pàgina però no re-analitza res més.
+    Images {
+        /// Quants links comprovar com a màxim (els més recents primer).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
     /// Reprocessa links existents (re-analitza => títols curts nous, tags, etc.)
     Reprocess {
         #[arg(long, default_value_t = 1000)]
@@ -175,6 +182,14 @@ pub async fn run(
             }
             let (done, total) = state.reindex_embeddings().await?;
             println!("Embeddings generats: {done}/{total}");
+            Ok(())
+        }
+        Cmd::Images { limit } => {
+            let (updated, checked) = state.backfill_images(limit).await?;
+            println!(
+                "Imatges obtingudes: {updated}/{checked} (links sense imatge analitzats). \
+                 Regenera la web o consulta /overlay per veure-les."
+            );
             Ok(())
         }
         Cmd::Reprocess { limit, shallow } => {

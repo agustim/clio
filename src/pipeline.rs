@@ -13,6 +13,9 @@ pub struct Parsed {
     pub title: Option<String>,
     pub text: String,
     pub og_type: Option<String>,
+    /// Imatge d'acompanyament: og:image de l'article o primera imatge.
+    /// Només URLs absolutes http(s); se serveix proxied via /img.
+    pub image: Option<String>,
 }
 
 /// FETCH: descarrega HTML amb capçaleres de navegador, timeout i limit de mida.
@@ -74,10 +77,25 @@ pub fn parse(html: &str) -> Parsed {
 
     let og_type = meta_content(&doc, "property", "og:type");
 
+    // Imatge d'acompanyament: og:image (o twitter:image), amb fallback a la
+    // primera imatge de l'article (article img > a img > img).
+    let image = meta_content(&doc, "property", "og:image")
+        .or_else(|| meta_content(&doc, "name", "twitter:image"))
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .or_else(|| {
+            Selector::parse("article img, a img, main img, img")
+                .ok()
+                .and_then(|sel| {
+                    doc.select(&sel).find_map(|e| e.value().attr("src"))
+                })
+                .map(|s| s.trim().to_string())
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        });
+
     // Text: prioritza <article>, si no <p>.
     let text = extract_text(&doc);
 
-    Parsed { title, text, og_type }
+    Parsed { title, text, og_type, image }
 }
 
 fn meta_content(doc: &Html, attr: &str, value: &str) -> Option<String> {
@@ -277,8 +295,9 @@ pub async fn process_link(
     let result = run_inner(cfg, http, llm, &link.url).await;
 
     match result {
-        Ok((title, link_type, analysis)) => {
-            db.update_link_analysis(link_id, title.as_deref(), link_type, &analysis).await?;
+        Ok((title, link_type, analysis, image)) => {
+            db.update_link_analysis(link_id, title.as_deref(), link_type, &analysis, image.as_deref())
+                .await?;
             // Embedding semàntic per al ranking personalitzat (best-effort).
             if let Some(emb) = embedder {
                 let text = embed_source(title.as_deref(), &analysis);
@@ -302,7 +321,7 @@ async fn run_inner(
     http: &reqwest::Client,
     llm: Option<&LlmClient>,
     url: &str,
-) -> Result<(Option<String>, LinkType, Analysis)> {
+) -> Result<(Option<String>, LinkType, Analysis, Option<String>)> {
     // Xarxes socials (X/Bluesky) renderitzen amb JS: un GET només dóna un mur de
     // login. Provem un extractor d'API pública abans del fetch genèric.
     let parsed = match crate::social::extract(http, url).await? {
@@ -336,7 +355,7 @@ async fn run_inner(
         .map(|t| clamp_title(&t))
         .filter(|t| !t.is_empty());
 
-    Ok((final_title, link_type, analysis))
+    Ok((final_title, link_type, analysis, parsed.image))
 }
 
 // ---- Embeddings ----

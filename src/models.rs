@@ -111,6 +111,11 @@ pub struct Link {
     pub deep_status: DeepStatus,
     pub deep_summary: Option<String>,
     pub code_stats: Option<serde_json::Value>,
+    /// Imatge d'acompanyament (og:image o primera imatge de l'article), per a
+    /// l'overlay de directe i futures cards. Se serveix proxied via /img
+    /// (evita hotlink i amaga el referrer). Buit = sense imatge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
     /// Embedding quantitzat (int8) per al ranking personalitzat a la web.
     /// `e` = vector i8; `s` = factor de dequantització (f32 ≈ e[i] * s).
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]

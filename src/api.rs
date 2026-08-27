@@ -2,7 +2,8 @@ use crate::error::{AppError, Result};
 use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment, User, UserRole};
 use crate::service::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -29,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/users/:id", patch(users_update).delete(users_delete))
         .route("/api/v1/users/:id/token", post(users_regen_token))
         .route("/api/v1/stats", get(stats))
+        // Overlay de directe (OBS Browser Source / mode headless).
+        .route("/overlay", get(overlay_page))
+        .route("/overlay/ticker.json", get(overlay_ticker))
+        .route("/img", get(img_proxy))
         // Tot el que no és /api cau a la web estàtica.
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
@@ -342,4 +347,40 @@ async fn block_link(
 async fn stats(State(state): State<AppState>) -> Result<Json<Value>> {
     let s = state.db.stats().await?;
     Ok(Json(json!(s)))
+}
+
+// ---- Overlay de directe (Twitch & co.) ----
+
+/// Escena HTML: font de navegador per a OBS o per al mode headless (Chromium).
+async fn overlay_page(State(state): State<AppState>) -> Html<String> {
+    Html(crate::overlay::overlay_html(&state.cfg))
+}
+
+/// Dades lleugeres de l'escena: últimes notícies processades.
+async fn overlay_ticker(State(state): State<AppState>) -> Result<Json<Value>> {
+    let t = crate::overlay::ticker(&state.db, state.cfg.overlay_max_items).await?;
+    Ok(Json(t))
+}
+
+/// Proxy d'imatges: evita hotlink/anti-leech, amaga el referrer i deixa
+/// cachejar. Només https/http a hosts públics (guardes SSRF a overlay.rs).
+async fn img_proxy(
+    State(state): State<AppState>,
+    Query(p): Query<ImgParams>,
+) -> Result<Response> {
+    let (bytes, ct) = crate::overlay::fetch_image(&state.http, &p.u).await?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ct),
+            (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ImgParams {
+    u: String,
 }

@@ -4,3 +4,4 @@
 .env
 /.fastembed_cache
 /.claude/
+/.smoke*

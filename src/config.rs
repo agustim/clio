@@ -100,6 +100,18 @@ pub struct Config {
     pub web_categories: Vec<(String, Vec<String>)>,
     /// Categoria seguida per defecte pels visitants nous (buida = totes les fonts).
     pub web_default_category: Option<String>,
+    /// --- Overlay de directe (Twitch & co.) ---
+    /// Cada quants segons es re-carrega el ticker (refresh del navegador/Chromium).
+    pub overlay_refresh_secs: u64,
+    /// Cada quants segons roten les cards visibles a l'escena.
+    pub overlay_rotate_secs: u64,
+    /// Quantes notícies entren a `ticker.json` (i al crawl).
+    pub overlay_max_items: usize,
+    /// Quantes cards es mostren a la vegada a la graella de l'escena.
+    pub overlay_cards: usize,
+    /// Línies de text (anàlisi del LLM) visibles per card a l'escena.
+    /// Triplicat per defecte; ajusta'l a `OVERLAY_TEXT_LINES`.
+    pub overlay_text_lines: usize,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -142,6 +154,21 @@ impl Config {
         let embed_dim: usize = get("EMBED_DIM", "256")
             .parse()
             .map_err(|_| AppError::Config("EMBED_DIM invalid".into()))?;
+        let overlay_refresh_secs: u64 = get("OVERLAY_REFRESH_SECS", "60")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_REFRESH_SECS invalid".into()))?;
+        let overlay_rotate_secs: u64 = get("OVERLAY_ROTATE_SECS", "12")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_ROTATE_SECS invalid".into()))?;
+        let overlay_max_items: usize = get("OVERLAY_MAX_ITEMS", "50")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_MAX_ITEMS invalid".into()))?;
+        let overlay_cards: usize = get("OVERLAY_CARDS", "4")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_CARDS invalid".into()))?;
+        let overlay_text_lines: usize = get("OVERLAY_TEXT_LINES", "9")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_TEXT_LINES invalid".into()))?;
 
         // LLM de chat.
         let llm_provider = get("LLM_PROVIDER", "none");
@@ -197,6 +224,11 @@ impl Config {
             clone_max_mb,
             web_categories: parse_categories(&get("WEB_CATEGORIES", "")),
             web_default_category: opt("WEB_DEFAULT_CATEGORY"),
+            overlay_refresh_secs,
+            overlay_rotate_secs,
+            overlay_max_items,
+            overlay_cards,
+            overlay_text_lines,
         })
     }
 }

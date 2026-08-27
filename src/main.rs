@@ -10,6 +10,7 @@ mod flaresolverr;
 mod llm;
 mod models;
 mod normalize;
+mod overlay;
 mod pipeline;
 mod queue;
 mod service;

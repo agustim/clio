@@ -44,7 +44,7 @@ async fn extract_tweet(http: &reqwest::Client, url: &str) -> Option<Parsed> {
     let screen = t["author"]["screen_name"].as_str().unwrap_or("");
     let title = social_title(name, screen);
     tracing::info!(%url, "social: tweet extret via fxtwitter");
-    Some(Parsed { title, text, og_type: None })
+    Some(Parsed { title, text, og_type: None, image: None })
 }
 
 /// Bluesky via l'API pública AT Protocol (getPostThread).
@@ -74,7 +74,7 @@ async fn extract_bsky(http: &reqwest::Client, url: &str) -> Option<Parsed> {
     let name = post["author"]["displayName"].as_str().unwrap_or("");
     let title = social_title(name, handle);
     tracing::info!(%url, "social: post Bluesky extret");
-    Some(Parsed { title, text, og_type: None })
+    Some(Parsed { title, text, og_type: None, image: None })
 }
 
 /// Títol de reserva (l'LLM en generarà un de millor a partir del text).

@@ -184,6 +184,75 @@ WEB_DEBOUNCE_SECS=60  # deploy reactiu: agrupa una ràfega de links nous en un s
 
 Recomanat: `WEB_REGEN_SECS=0` + deploy reactiu — la web es regenera i fa push només quan la cua acaba d'analitzar links nous (debounce per agrupar ràfegues).
 
+## Overlay de directe i emissió a Twitch
+
+Clio pot generar un **canal de notícies en directe** a partir del mateix contingut que ja
+recull: una escena HTML amb **bloc superior** (logo + rellotge/data en directe i segell
+"EN DIRECTE"), **zona central** de cards de notícies que roten automàticament — on el cos
+de cada notícia és **l'anàlisi profunda del LLM** (`deep_summary`, netejada de markdown),
+amb títol, tipus, font `@reporter` i **imatge d'acompanyament amb crèdit** — i **bloc
+inferior** amb el *news crawl* de titulars.
+
+- `/overlay` — l'escena HTML (font de navegador per a OBS, o per al mode headless).
+- `/overlay/ticker.json` — les últimes N notícies processades (`OVERLAY_MAX_ITEMS`, per
+  defecte 50), amb `image` proxied via `/img`.
+- `/img?u=...` — proxy d'imatges (anti-hotlink, amaga el referrer, guardes SSRF).
+
+Comportament de l'escena: la graella mostra `OVERLAY_CARDS` cards i **salta de CARDS en
+CARDS** a cada canvi (`OVERLAY_ROTATE_SECS`) — totes canvien a l'hora —; cada card mostra
+fins a `OVERLAY_TEXT_LINES` línies (per defecte 9) de l'anàlisi del LLM, donant
+prioritat al text i limitant l'alçada de la imatge (`height: clamp(110px, 17vh, 180px)`).
+
+Les imatges s'extreuen del `og:image` (o primera imatge) de cada article a la 1a passa.
+Backfill per als links ja processats, **sense re-analitzar res**:
+
+```bash
+linkanalyzer images --limit 200   # extreu og:image per als més recents que en manquin
+```
+
+> Política mixta recomanada: `og:image` de l'article **sempre amb crèdit** (`📷 domini` a
+> la card) i, si no n'hi ha, placeholder del tema. Si vols imatges lliures de risc, pots
+> canviar el fallback a Wikimedia/Openverse (vegeu `src/overlay.rs`).
+
+### Emetre amb OBS (ràpid, semiautomàtic)
+
+1. `linkanalyzer serve` (o el desplegament).
+2. OBS → Font de navegador → `http://127.0.0.1:8080/overlay` (1280×720).
+3. Afegeix una font de navegador per al directe i *Inicia emissió* a Twitch.
+
+### Emetre headless 24/7 (sense OBS)
+
+El mode `stream` (Xvfb + Chromium + ffmpeg → RTMP) automatitza el directe del tot:
+
+```bash
+cp .env.example .env    # posa-hi TWITCH_STREAM_KEY=...
+docker compose -f docker-compose.stream.yml up -d --build
+```
+
+- `scripts/stream.sh` — captura l'overlay i el puja a Twitch, reiniciant ffmpeg si la
+  connexió cau. Usa un **perfil de Chromium fresc a cada arrencada** (`CHROME_PROFILE`,
+  per defecte `/tmp/clio-chrome`) amb `--no-first-run`, `--no-default-browser-check`
+  i `--disable-features=Translate`: garanteix que la finestra kiosk obri només l'overlay,
+  sense cap element de Chrome (finestra de navegador per defecte, traducció, pestanya
+  buida "This space intentionally blank…").
+- `Dockerfile.stream` / `docker-compose.stream.yml` — servei `stream` (depèn de `clio`).
+  L'script es copia a la imatge en el build, així que després de tocar-lo cal
+  `docker compose -f docker-compose.stream.yml up -d --build stream`.
+- Variables: `OVERLAY_URL`, `TWITCH_RTMP_URL` (default `rtmp://live.twitch.tv/app`),
+  `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k).
+  **Tingues en compte**: el Chromium kiosk força la finestra a 1920×1080. Si la pantalla
+  virtual fos més petita, el contingut es retallaria i es veuria encongit — per això
+  l'escena es captura a 1080p (1920×1080) per defecte. Si depasses Twitch amb `rtmp://`
+  directe, recorda que el límit màxim de bitrate és ~6000 kbps.
+
+<br>
+
+> **Avís (contingut de tercers)**: els titulars i resums amb **font visible** són citació
+> legítima, però les **imatges** pertanyen a qui les crea. Mostrar `og:image` amb crèdit
+> és el que fan els agregadors i té risc baix a la pràctica, però no l'elimina del tot
+> (DMCA). No reprodueixis vídeos sencers aliens (banda ampla + rebroadcast prohibit);
+> mostra miniatura/enllaç al canal original.
+
 ## Docker
 
 Imatge mínima multi-stage ([Dockerfile](Dockerfile)):

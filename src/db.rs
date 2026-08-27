@@ -66,6 +66,7 @@ impl Db {
             ("006_feeds", include_str!("../migrations/006_feeds.sql")),
             ("007_blocklist", include_str!("../migrations/007_blocklist.sql")),
             ("008_fail_counts", include_str!("../migrations/008_fail_counts.sql")),
+            ("009_overlay", include_str!("../migrations/009_overlay.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -485,6 +486,7 @@ impl Db {
             ),
             deep_summary,
             code_stats,
+            image_url: r.get("image_url"),
             embedding,
             embed_scale,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
@@ -492,7 +494,7 @@ impl Db {
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, embedding, embed_scale, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, embedding, embed_scale, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -576,17 +578,19 @@ impl Db {
         title: Option<&str>,
         link_type: LinkType,
         analysis: &Analysis,
+        image: Option<&str>,
     ) -> Result<()> {
         let tags = serde_json::to_string(&analysis.tags)?;
         sqlx::query(
             "UPDATE links SET title = ?, summary = ?, link_type = ?, tags = ?, sentiment = ?, \
-             status = 'done', updated_at = ? WHERE id = ?",
+             image_url = ?, status = 'done', updated_at = ? WHERE id = ?",
         )
         .bind(title)
         .bind(&analysis.summary)
         .bind(link_type.as_str())
         .bind(tags)
         .bind(analysis.sentiment.as_str())
+        .bind(image)
         .bind(now_str())
         .bind(link_id.to_string())
         .execute(&self.pool)
@@ -623,6 +627,18 @@ impl Db {
         .bind(link_id.to_string())
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Actualitza només la imatge d'acompanyament d'un link (p.ex. backfill
+    /// d'imatges; no toca res més de l'anàlisi).
+    pub async fn set_link_image(&self, link_id: Uuid, image: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE links SET image_url = ?, updated_at = ? WHERE id = ?")
+            .bind(image)
+            .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -739,6 +755,20 @@ impl Db {
         query = query.bind(limit);
 
         let rows = query.fetch_all(&self.pool).await?;
+        let mut links: Vec<Link> = rows.iter().map(Self::row_to_link).collect::<Result<_>>()?;
+        self.fill_reporters(&mut links).await?;
+        Ok(links)
+    }
+
+    /// Les últimes `limit` notícies PROCESSADES (status='done'), per data de
+    /// creació (més recents primer). És la font de l'overlay/ticker.
+    pub async fn latest_done_links(&self, limit: i64) -> Result<Vec<Link>> {
+        let q = format!(
+            "SELECT {} FROM links WHERE status = 'done' \
+             ORDER BY created_at DESC, updated_at DESC LIMIT ?",
+            Self::LINK_COLS
+        );
+        let rows = sqlx::query(&q).bind(limit).fetch_all(&self.pool).await?;
         let mut links: Vec<Link> = rows.iter().map(Self::row_to_link).collect::<Result<_>>()?;
         self.fill_reporters(&mut links).await?;
         Ok(links)

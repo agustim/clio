@@ -202,6 +202,39 @@ impl AppState {
         Ok((done, total))
     }
 
+    /// Backfill d'imatges: re-baixa la pàgina dels links processats sense
+    /// imatge i n'extreu og:image / primera imatge (sense re-analitzar res).
+    /// Retorna (imatges obtingudes, links sense imatge comprovats).
+    pub async fn backfill_images(&self, limit: i64) -> Result<(usize, usize)> {
+        let ids = self.db.all_link_ids(limit).await?;
+        let (mut updated, mut checked) = (0usize, 0usize);
+        for id in ids {
+            let Ok(Some(l)) = self.db.link_by_id(id).await else {
+                continue;
+            };
+            if l.image_url.is_some() {
+                continue; // ja en té
+            }
+            checked += 1;
+            match crate::pipeline::fetch(&self.http, &self.cfg, &l.url).await {
+                Ok(html) => {
+                    let img = crate::pipeline::parse(&html).image;
+                    if let Some(img) = img {
+                        match self.db.set_link_image(id, Some(&img)).await {
+                            Ok(()) => {
+                                tracing::info!(%id, url = %l.url, "imatge obtinguda");
+                                updated += 1;
+                            }
+                            Err(e) => tracing::warn!(%id, error = %e, "desar imatge fallit"),
+                        }
+                    }
+                }
+                Err(e) => tracing::info!(%id, error = %e, "backfill imatge: fetch fallit"),
+            }
+        }
+        Ok((updated, checked))
+    }
+
     /// Processament complet inline (shallow + deep) — usat per la CLI, que no
     /// té workers en marxa. Espera fins acabar.
     pub async fn process_full(&self, link_id: Uuid) -> Result<()> {
