@@ -774,11 +774,16 @@ impl Db {
         Ok(links)
     }
 
-    /// Les últimes `limit` notícies PROCESSADES (status='done'), per data de
-    /// creació (més recents primer). És la font de l'overlay/ticker.
+    /// Les últimes `limit` notícies PROCESSADES amb ANÀLISI PROFUNDA
+    /// (status='done' i deep pass completada amb text real), per data de
+    /// creació (més recents primer). És la font de l'overlay/ticker: només es
+    /// mostren notícies amb anàlisi profunda (deep_summary net), descartant
+    /// les que no l'han assolit (`deep_status` none/failed) o la tenen buida.
     pub async fn latest_done_links(&self, limit: i64) -> Result<Vec<Link>> {
         let q = format!(
-            "SELECT {} FROM links WHERE status = 'done' \
+            "SELECT {} FROM links \
+             WHERE status = 'done' AND deep_status = 'done' \
+               AND deep_summary IS NOT NULL AND trim(deep_summary) != '' \
              ORDER BY created_at DESC, updated_at DESC LIMIT ?",
             Self::LINK_COLS
         );
@@ -835,4 +840,60 @@ pub struct Stats {
     pub done: i64,
     pub pending: i64,
     pub users: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// DB temporal sobre un fitxer (la in-memory de sqlite no es comparteix
+    /// entre connexions del pool; un fitxer temporal és segur i estable).
+    async fn temp_db() -> Db {
+        let path = std::env::temp_dir().join(format!("clio-test-{}.db", Uuid::new_v4()));
+        Db::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .expect("connect db test")
+    }
+
+    #[tokio::test]
+    async fn latest_done_links_only_returns_links_with_real_deep_analysis() {
+        let db = temp_db().await;
+        let reporter = Uuid::new_v4();
+
+        // done + deep completa amb text -> SÍ que ha d'aparèixer.
+        let ok = db.create_link("https://ex.com/ok", reporter).await.unwrap();
+        db.set_link_status(ok.id, LinkStatus::Done).await.unwrap();
+        db.update_deep_analysis(ok.id, "Anàlisi profunda real", None).await.unwrap();
+
+        // done sense deep pass (deep_status='none') -> NO.
+        let none = db.create_link("https://ex.com/none", reporter).await.unwrap();
+        db.set_link_status(none.id, LinkStatus::Done).await.unwrap();
+
+        // done amb deep fallit -> NO.
+        let failed = db.create_link("https://ex.com/failed", reporter).await.unwrap();
+        db.set_link_status(failed.id, LinkStatus::Done).await.unwrap();
+        db.set_deep_status(failed.id, DeepStatus::Failed).await.unwrap();
+
+        // done amb deep 'done' però resum buit -> NO.
+        let blank = db.create_link("https://ex.com/blank", reporter).await.unwrap();
+        db.set_link_status(blank.id, LinkStatus::Done).await.unwrap();
+        db.update_deep_analysis(blank.id, "   ", None).await.unwrap();
+
+        // Pendent amb deep completa -> NO (status no és done).
+        let pending = db.create_link("https://ex.com/pending", reporter).await.unwrap();
+        db.update_deep_analysis(pending.id, "anàlisi tot i pendent", None).await.unwrap();
+
+        let items = db.latest_done_links(50).await.unwrap();
+        let urls: Vec<&str> = items.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec!["https://ex.com/ok"],
+            "només el link amb deep completa i text real ha d'aparèixer: {urls:?}"
+        );
+        // Tots els retornats compleixen la invariància deep.
+        for l in &items {
+            assert_eq!(l.deep_status, DeepStatus::Done);
+            assert_ne!(l.deep_summary.as_deref().map(str::trim).unwrap_or(""), "");
+        }
+    }
 }

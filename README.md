@@ -194,8 +194,10 @@ amb títol, tipus, font `@reporter` i **imatge d'acompanyament amb crèdit** —
 inferior** amb el *news crawl* de titulars.
 
 - `/overlay` — l'escena HTML (font de navegador per a OBS, o per al mode headless).
-- `/overlay/ticker.json` — les últimes N notícies processades (`OVERLAY_MAX_ITEMS`, per
-  defecte 50), amb `image` apuntant a la còpia local o al proxy `/img`.
+- `/overlay/ticker.json` — les últimes N notícies **amb anàlisi profunda**
+  (`deep_status='done'` i `deep_summary` no buit; les que no l'han assolit no
+  es mostren a l'overlay), limitades per `OVERLAY_MAX_ITEMS` (per defecte 50),
+  amb `image` apuntant a la còpia local o al proxy `/img`.
 - `/imgout/{id}` — serveix la **còpia local** de la imatge (desada a `IMAGES_DIR`,
   per defecte `data/images/`).
 - `/img?u=...` — proxy d'imatges remot (anti-hotlink, amaga el referrer, guardes SSRF).
