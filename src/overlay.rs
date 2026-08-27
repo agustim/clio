@@ -242,6 +242,11 @@ pub fn overlay_html(cfg: &Config) -> String {
         .replace("{{ROTATE}}", &cfg.overlay_rotate_secs.to_string())
         .replace("{{CARDS}}", &cfg.overlay_cards.max(1).to_string())
         .replace("{{LINES}}", &cfg.overlay_text_lines.max(1).to_string())
+        // TimeZone IANA (JSON-quoted) per a les hores de l'escena; "" = hora local.
+        .replace(
+            "{{TIMEZONE}}",
+            &serde_json::json!(cfg.overlay_timezone.as_deref().unwrap_or("")).to_string(),
+        )
 }
 
 const OVERLAY_HTML: &str = r##"<!DOCTYPE html>
@@ -316,6 +321,18 @@ const OVERLAY_HTML: &str = r##"<!DOCTYPE html>
     position:absolute; left:9px; top:9px; font-size:13px; font-weight:700; text-transform:uppercase;
     letter-spacing:.05em; padding:4px 9px; border-radius:7px; background:rgba(0,0,0,.55); color:var(--ok);
   }
+  .badge-new {
+    position:absolute; right:9px; top:9px; font-size:13px; font-weight:800; letter-spacing:.05em;
+    padding:4px 9px; border-radius:7px; background:var(--red); color:#fff;
+    box-shadow:0 0 14px rgba(255,90,90,.55);
+  }
+  /* Notícia publicada fa menys de 30 minuts: marc vermell amb pols suau. */
+  .card.new {
+    border-color:var(--red);
+    box-shadow:0 0 0 2px rgba(255,90,90,.5), 0 10px 30px rgba(0,0,0,.45);
+    animation:fade .5s ease, pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { box-shadow:0 0 0 4px rgba(255,90,90,.22), 0 10px 30px rgba(0,0,0,.45); } }
   .card-body { flex:1; display:flex; flex-direction:column; gap:9px; padding:14px 16px 15px; min-height:0; overflow:hidden; }
   .card h3 {
     font-size:24px; line-height:1.22; font-weight:800; letter-spacing:-.01em;
@@ -352,6 +369,10 @@ const OVERLAY_HTML: &str = r##"<!DOCTYPE html>
   .crawl-item { display:inline-flex; align-items:center; gap:12px; font-size:22px; font-weight:600; padding:0 38px; }
   .crawl-item .csrc { color:var(--acc); font-weight:800; font-size:17px; }
   .crawl-item .ctime { color:var(--faint); font-weight:600; font-size:16px; }
+  .crawl-item .cnew {
+    font-size:13px; font-weight:800; letter-spacing:.05em; color:#fff;
+    background:var(--red); padding:3px 8px; border-radius:6px;
+  }
   .crawl-item .cdot { color:var(--muted); }
 </style>
 </head>
@@ -389,17 +410,25 @@ const REFRESH = parseInt({{REFRESH}}, 10) * 1000 || 60000;
 const ROTATE  = parseInt({{ROTATE}}, 10) * 1000 || 12000;
 const CARDS   = Math.max(1, parseInt({{CARDS}}, 10) || 4);
 
+// TimeZone configurable de l'escena (IANA, p.ex. "Europe/Andorra"); "" = hora
+// local del navegador que emet el stream.
+const TZ = {{TIMEZONE}};
+const TZ_OPT = TZ ? { timeZone: TZ } : {};
+// Una notícia es considera NOVA durant els primers N minuts des de la publicació.
+const NEW_MS = 30 * 60 * 1000; // 30 minuts
+
 let ITEMS = [];
 let idx = 0;
 
 const $ = id => document.getElementById(id);
 
-// ---- Rellotge / data ----
+// ---- Rellotge / data (respecta la TimeZone configurada) ----
 function tick() {
   const now = new Date();
-  $('ov-clock').textContent = now.toLocaleTimeString('ca-ES', { hour12:false });
+  $('ov-clock').textContent = now.toLocaleTimeString('ca-ES',
+    Object.assign({ hour12:false }, TZ_OPT));
   $('ov-date').textContent = now.toLocaleDateString('ca-ES',
-    { weekday:'short', day:'2-digit', month:'short' });
+    Object.assign({ weekday:'short', day:'2-digit', month:'short' }, TZ_OPT));
 }
 setInterval(tick, 500); tick();
 
@@ -410,13 +439,22 @@ function domainOf(l){ return (l.domain || '').replace(/^www\./,''); }
 const TYPE_LABELS = { news:'Notícia', repo:'Repo', article:'Article', video:'Vídeo',
                       blog:'Blog', social:'Xarxa social', other:'Altres' };
 function typeLabel(t){ return TYPE_LABELS[t] || (t || 'Altres'); }
-// Dia i hora de la notícia (RFC3339/UTC -> hora local de l'emissió), ex. "27 ago · 12:45".
+// Dia i hora de la notícia (RFC3339/UTC -> la TimeZone de l'escena), ex. "27 ago · 12:45".
 function fmtDate(iso){
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('ca-ES', { day:'2-digit', month:'short' })
-       + ' · ' + d.toLocaleTimeString('ca-ES', { hour:'2-digit', minute:'2-digit' });
+  return d.toLocaleDateString('ca-ES',
+           Object.assign({ day:'2-digit', month:'short' }, TZ_OPT))
+       + ' · ' + d.toLocaleTimeString('ca-ES',
+           Object.assign({ hour:'2-digit', minute:'2-digit' }, TZ_OPT));
+}
+// Vertader si la notícia s'ha publicat fa menys de NEW_MS (marcada com a NOVA).
+function isNew(l){
+  if (!l || !l.date) return false;
+  const t = new Date(l.date).getTime();
+  if (isNaN(t)) return false;
+  return (Date.now() - t) < NEW_MS;
 }
 function cardHtml(l) {
   const img = l.image
@@ -424,10 +462,12 @@ function cardHtml(l) {
     : `<div class="ph">◆</div>`;
   const credit = l.image && domainOf(l) ? `<span class="credit">📷 ${esc(domainOf(l))}</span>` : '';
   const type = esc(typeLabel(l.link_type));
+  const fresh = isNew(l);
+  const badgeNew = fresh ? '<span class="badge-new">● NOU</span>' : '';
   // Cos de la notícia = anàlisi profunda del LLM; si no n'hi ha, resum curt.
   const body = (l.text && l.text.trim()) ? l.text : (l.summary || l.title);
-  return `<article class="card">
-    <div class="thumb">${img}${credit}<span class="badge-lt">${type}</span></div>
+  return `<article class="card${fresh ? ' new' : ''}">
+    <div class="thumb">${img}${credit}<span class="badge-lt">${type}</span>${badgeNew}</div>
     <div class="card-body">
       <h3>${esc(l.title)}</h3>
       <p class="sum">${esc(body)}</p>
@@ -455,6 +495,7 @@ function renderCrawl() {
   const twice = ITEMS.concat(ITEMS).map(l =>
     `<span class="crawl-item"><span class="csrc">${esc(l.source)}</span>` +
     `<span class="ctime">${esc(fmtDate(l.date))}</span>` +
+    (isNew(l) ? '<span class="cnew">● NOU</span>' : '') +
     `<span>${esc(l.title)}</span><span class="cdot">•</span></span>`).join('');
   const t = $('crawl');
   t.innerHTML = twice;
@@ -528,6 +569,18 @@ mod tests {
                 "la card mostra el tipus de notícia");
         assert!(OVERLAY_HTML.contains("Notícia"),
                 "hi ha etiquetes de tipus en català");
+        // TimeZone configurable per a les hores de l'escena.
+        assert!(OVERLAY_HTML.contains("TZ_OPT"),
+                "les hores respecten la TimeZone configurada");
+        assert!(OVERLAY_HTML.contains("{{TIMEZONE}}"),
+                "la TimeZone s'injecta des de config");
+        // Notícies recents (< 30 min) marcades com a NOVA amb marc/cintó.
+        assert!(OVERLAY_HTML.contains("NEW_MS"),
+                "hi ha una finestra de 'nova' (30 min)");
+        assert!(OVERLAY_HTML.contains("isNew(l)"),
+                "card i crawl marquen la notícia nova");
+        assert!(OVERLAY_HTML.contains("badge-new") && OVERLAY_HTML.contains("card.new"),
+                "la notícia nova té marc i etiqueta NOU");
     }
 
     /// Cada element del ticker porta la data/hora (RFC3339) de la notícia.
@@ -560,6 +613,25 @@ mod tests {
         let v = item(&link);
         assert_eq!(v["date"], "2025-08-27T09:48:00+00:00");
         assert_eq!(v["link_type"], "article");
+    }
+
+    /// `overlay_html` injecta la TimeZone configurada al JS ("" si va buida).
+    #[test]
+    fn overlay_html_injects_timezone() {
+        std::env::remove_var("OVERLAY_TIMEZONE");
+        let html = overlay_html(&Config::from_env().unwrap());
+        assert!(
+            html.contains("const TZ = \"\";"),
+            "sense TimeZone la constant queda buida"
+        );
+
+        std::env::set_var("OVERLAY_TIMEZONE", "Europe/Andorra");
+        let html = overlay_html(&Config::from_env().unwrap());
+        assert!(
+            html.contains("const TZ = \"Europe/Andorra\";"),
+            "la TimeZone surt JSON-quoted al JS"
+        );
+        std::env::remove_var("OVERLAY_TIMEZONE");
     }
 
     /// Percent-encoding per al proxy: els caràcters reservats van a %XX.

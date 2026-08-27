@@ -208,6 +208,12 @@ CARDS** a cada canvi (`OVERLAY_ROTATE_SECS`) — totes canvien a l'hora —; cad
 fins a `OVERLAY_TEXT_LINES` línies (per defecte 9) de l'anàlisi del LLM, donant
 prioritat al text i limitant l'alçada de la imatge (`height: clamp(110px, 17vh, 180px)`).
 
+Les **hores/data de les notícies i el rellotge** es mostren a la **TimeZone configurable**
+`OVERLAY_TIMEZONE` (IANA, p.ex. `Europe/Andorra`); si va buida s'usa l'hora local del
+navegador que emet el stream. Les notícies publicades fa menys de 30 minuts es marquen
+com a **NOU**: la card rep un **marc vermell** amb pols suau i un cintó `● NOU`, i al
+*news crawl* apareix la mateixa etiqueta.
+
 Les imatges s'extreuen del `og:image` (o primera imatge) de cada article a la 1a passa i,
 **en analitzar la cua, es baixen i es desen localment** a `IMAGES_DIR` com a
 `<link_id>.<ext>`: l'overlay les serveix des de `/imgout/{id}` (ràpid, sense dependre del

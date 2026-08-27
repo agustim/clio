@@ -117,6 +117,9 @@ pub struct Config {
     /// Línies de text (anàlisi del LLM) visibles per card a l'escena.
     /// Triplicat per defecte; ajusta'l a `OVERLAY_TEXT_LINES`.
     pub overlay_text_lines: usize,
+    /// TimeZone (IANA, p.ex. "Europe/Andorra") per a les dates/hores de les
+    /// notícies i el rellotge de l'escena. Buit = hora local del navegador.
+    pub overlay_timezone: Option<String>,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -174,6 +177,7 @@ impl Config {
         let overlay_text_lines: usize = get("OVERLAY_TEXT_LINES", "9")
             .parse()
             .map_err(|_| AppError::Config("OVERLAY_TEXT_LINES invalid".into()))?;
+        let overlay_timezone = opt("OVERLAY_TIMEZONE");
 
         // LLM de chat.
         let llm_provider = get("LLM_PROVIDER", "none");
@@ -235,6 +239,7 @@ impl Config {
             overlay_max_items,
             overlay_cards,
             overlay_text_lines,
+            overlay_timezone,
         })
     }
 }
