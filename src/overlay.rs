@@ -68,6 +68,9 @@ fn item(l: &Link) -> Value {
         "sentiment": l.sentiment.as_str(),
         "source": source,
         "image": image_for(l),
+        // Dia i hora de la notícia (quan es va recollir). S'envia com a RFC3339
+        // (UTC) i el navegador el mostra en hora local de l'emissió, com el rellotge.
+        "date": l.created_at.to_rfc3339(),
     })
 }
 
@@ -327,6 +330,11 @@ const OVERLAY_HTML: &str = r##"<!DOCTYPE html>
     font-size:15.5px; color:var(--faint);
   }
   .card .src { font-weight:700; color:var(--acc); font-size:17px; }
+  .card .when {
+    flex:none; display:inline-flex; align-items:center; gap:5px; font-size:14.5px;
+    font-weight:600; color:var(--muted); background:rgba(0,0,0,.28);
+    padding:3px 9px; border-radius:7px; letter-spacing:.01em;
+  }
 
   /* ---- Bloc inferior: news crawl ---- */
   .bottom {
@@ -343,6 +351,7 @@ const OVERLAY_HTML: &str = r##"<!DOCTYPE html>
   @keyframes crawl { from { transform:translateX(0); } to { transform:translateX(-50%); } }
   .crawl-item { display:inline-flex; align-items:center; gap:12px; font-size:22px; font-weight:600; padding:0 38px; }
   .crawl-item .csrc { color:var(--acc); font-weight:800; font-size:17px; }
+  .crawl-item .ctime { color:var(--faint); font-weight:600; font-size:16px; }
   .crawl-item .cdot { color:var(--muted); }
 </style>
 </head>
@@ -397,12 +406,24 @@ setInterval(tick, 500); tick();
 // ---- Cards (rotació) ----
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function domainOf(l){ return (l.domain || '').replace(/^www\./,''); }
+// Tipus de notícia amb etiqueta llegible en català.
+const TYPE_LABELS = { news:'Notícia', repo:'Repo', article:'Article', video:'Vídeo',
+                      blog:'Blog', social:'Xarxa social', other:'Altres' };
+function typeLabel(t){ return TYPE_LABELS[t] || (t || 'Altres'); }
+// Dia i hora de la notícia (RFC3339/UTC -> hora local de l'emissió), ex. "27 ago · 12:45".
+function fmtDate(iso){
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('ca-ES', { day:'2-digit', month:'short' })
+       + ' · ' + d.toLocaleTimeString('ca-ES', { hour:'2-digit', minute:'2-digit' });
+}
 function cardHtml(l) {
   const img = l.image
     ? `<img src="${esc(l.image)}" alt="" loading="eager" referrerpolicy="no-referrer">`
     : `<div class="ph">◆</div>`;
   const credit = l.image && domainOf(l) ? `<span class="credit">📷 ${esc(domainOf(l))}</span>` : '';
-  const type = esc(l.link_type || 'other');
+  const type = esc(typeLabel(l.link_type));
   // Cos de la notícia = anàlisi profunda del LLM; si no n'hi ha, resum curt.
   const body = (l.text && l.text.trim()) ? l.text : (l.summary || l.title);
   return `<article class="card">
@@ -412,7 +433,7 @@ function cardHtml(l) {
       <p class="sum">${esc(body)}</p>
       <div class="meta">
         <span class="src">${esc(l.source)}</span>
-        <span title="${esc(l.url)}">${esc(domainOf(l))}</span>
+        <span class="when" title="${esc(l.url)}">🗓 ${esc(fmtDate(l.date))}</span>
       </div>
     </div>
   </article>`;
@@ -433,6 +454,7 @@ function renderCrawl() {
   // Doble del contingut per fer la transició de bucle contínua (-50%).
   const twice = ITEMS.concat(ITEMS).map(l =>
     `<span class="crawl-item"><span class="csrc">${esc(l.source)}</span>` +
+    `<span class="ctime">${esc(fmtDate(l.date))}</span>` +
     `<span>${esc(l.title)}</span><span class="cdot">•</span></span>`).join('');
   const t = $('crawl');
   t.innerHTML = twice;
@@ -499,6 +521,45 @@ mod tests {
                 "la imatge té alçada limitada per donar espai al text");
         // La card mostra l'anàlisi (text) amb fallback al resum.
         assert!(OVERLAY_HTML.contains("l.text && l.text.trim()"));
+        // La card i el crawl mostren dia/hora de la notícia i el tipus en català.
+        assert!(OVERLAY_HTML.contains("fmtDate(l.date)"),
+                "la card/crawl renderitzen la data de la notícia");
+        assert!(OVERLAY_HTML.contains("typeLabel(l.link_type)"),
+                "la card mostra el tipus de notícia");
+        assert!(OVERLAY_HTML.contains("Notícia"),
+                "hi ha etiquetes de tipus en català");
+    }
+
+    /// Cada element del ticker porta la data/hora (RFC3339) de la notícia.
+    #[test]
+    fn ticker_item_includes_date() {
+        use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment};
+        let link = Link {
+            id: uuid::Uuid::new_v4(),
+            url: "https://example.com/noticia".into(),
+            title: Some("títol".into()),
+            summary: Some("resum".into()),
+            link_type: LinkType::Article,
+            tags: vec![],
+            sentiment: Sentiment::Neutral,
+            status: LinkStatus::Done,
+            co_reporters: vec![],
+            reporters: vec!["npc1".into()],
+            deep_status: DeepStatus::Done,
+            deep_summary: Some("anàlisi **profunda**".into()),
+            code_stats: None,
+            image_url: None,
+            image_file: None,
+            embedding: None,
+            embed_scale: None,
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-08-27T09:48:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::Utc::now(),
+        };
+        let v = item(&link);
+        assert_eq!(v["date"], "2025-08-27T09:48:00+00:00");
+        assert_eq!(v["link_type"], "article");
     }
 
     /// Percent-encoding per al proxy: els caràcters reservats van a %XX.

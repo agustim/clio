@@ -190,7 +190,8 @@ Clio pot generar un **canal de notícies en directe** a partir del mateix contin
 recull: una escena HTML amb **bloc superior** (logo + rellotge/data en directe i segell
 "EN DIRECTE"), **zona central** de cards de notícies que roten automàticament — on el cos
 de cada notícia és **l'anàlisi profunda del LLM** (`deep_summary`, netejada de markdown),
-amb títol, tipus, font `@reporter` i **imatge d'acompanyament amb crèdit** — i **bloc
+amb títol, **tipus de notícia** (etiqueta en català), **dia i hora de la notícia**, font
+`@reporter` i **imatge d'acompanyament amb crèdit** — i **bloc
 inferior** amb el *news crawl* de titulars.
 
 - `/overlay` — l'escena HTML (font de navegador per a OBS, o per al mode headless).
