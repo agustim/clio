@@ -63,16 +63,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build i push
+      - name: Build i push (clio - target app)
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: app
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ github.ref_name }}
             ${{ env.IMAGE }}:latest
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+      - name: Build i push (clio-stream - target stream, "tot en un")
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: stream
+          push: true
+          tags: |
+            ${{ env.IMAGE }}-stream:${{ github.ref_name }}
+            ${{ env.IMAGE }}-stream:latest
+          cache-from: type=registry,ref=${{ env.IMAGE }}-stream:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}-stream:buildcache,mode=max
 
   # 3) Neteja: manté com a màxim les últimes 5 de cada
   cleanup:
@@ -91,10 +104,18 @@ jobs:
                 gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
               done
 
-      - name: Esborra packages vells (manté 5, protegeix latest)
+      - name: Esborra packages vells de clio (manté 5, protegeix latest)
         uses: actions/delete-package-versions@v5
         with:
           package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: 5
+          ignore-versions: '^latest$'
+
+      - name: Esborra packages vells de clio-stream (manté 5, protegeix latest)
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}-stream
           package-type: container
           min-versions-to-keep: 5
           ignore-versions: '^latest$'

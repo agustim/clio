@@ -10,7 +10,9 @@
 # interna. Per accés local afegeix `ports: ["8080:8080"]` al servei clio.
 services:
   clio:
-    build: .
+    build:
+      context: .
+      target: app   # imatge lleugera: només serve (el stream té el seu propi compose)
     image: ghcr.io/agustim/clio:latest
     restart: unless-stopped
     env_file: .env

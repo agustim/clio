@@ -1,3 +1,19 @@
+# ---- Clio: container "tot en un" (multietapa) ----
+#
+# Un sol Dockerfile construeix DÜES imatges des d'aquest repo (cap dependència
+# d'imatges base pròpies ja publicades):
+#
+#   docker build --target app -t <reg>/clio:latest .
+#       -> imatge LLEUGERA: només clio serve (API + web). És l'equivalente
+#          exacte de l'antic Dockerfile. Útil per al desplegament web.
+#
+#   docker build --target stream -t <reg>/clio-stream:latest .
+#   docker build .                              (mateix; stream és el target per defecte)
+#       -> imatge "TOT EN UN": clio serve + emissió headless a Twitch
+#          (Xvfb + Chromium + ffmpeg) + tota la CLI. Tria el mode amb:
+#            CLIO_MODE=serve   (per defecte)  CLIO_MODE=stream
+#            o passa un subordre CLI directe: docker run img images --limit 5
+
 # ---- build ----
 # trixie (glibc 2.38): el binari precompilat d'onnxruntime (via fastembed/ort)
 # referencia símbols __isoc23_* que bookworm (glibc 2.36) no té.
@@ -8,8 +24,8 @@ COPY src ./src
 COPY migrations ./migrations
 RUN cargo build --release --bin linkanalyzer
 
-# ---- runtime ----
-FROM debian:trixie-slim
+# ---- app: runtime lleuger (clio serve) ----
+FROM debian:trixie-slim AS app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
@@ -22,3 +38,24 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     PUBLIC_DIR=public
 EXPOSE 8080
 CMD ["linkanalyzer", "serve"]
+
+# ---- stream: "tot en un" (a partir de app) ----
+FROM app AS stream
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb chromium xdotool ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/stream.sh /usr/local/bin/stream.sh
+RUN chmod +x /usr/local/bin/stream.sh
+# Dispatcher: CLIO_MODE=stream -> emissió; sinó -> linkanalyzer serve (o la
+# subordre CLI passada per arguments).
+COPY scripts/clio-entry.sh /usr/local/bin/clio
+RUN chmod +x /usr/local/bin/clio
+ENTRYPOINT ["clio"]
+# Important: anul·la el CMD heretat de `app` ("linkanalyzer serve"). Amb
+# ENTRYPOINT=clio, el CMD quedaria duplicat; en blanc deixa que el dispatcher
+# decideixi: CLIO_MODE=stream -> stream.sh; sense res -> linkanalyzer serve;
+# amb arguments -> la subordre CLI que passis.
+CMD []
+
+# El target per defecte de `docker build .` és stream (l'última etapa), és a
+# dir la imatge "tot en un". Usa --target app per a la lleugera.

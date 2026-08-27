@@ -228,21 +228,40 @@ linkanalyzer images --limit 200   # 1) extreu og:image pels que en manquin; 2) b
 
 ### Emetre headless 24/7 (sense OBS)
 
-El mode `stream` (Xvfb + Chromium + ffmpeg → RTMP) automatitza el directe del tot:
+El mode `stream` (Xvfb + Chromium + ffmpeg → RTMP) automatitza el directe del tot.
+**Un mateix [Dockerfile](Dockerfile) multietapa construeix totes dues imatges**, sense
+dependre d'imatges base pròpies ja publicades:
+
+| Target | Imatge | Contingut |
+|---|---|---|
+| `--target app` (per defecte a la imatge `clio`) | `ghcr.io/agustim/clio` | lleugera: només `clio serve` (API + web) |
+| `--target stream` (per defecte de `docker build .`) | `ghcr.io/agustim/clio-stream` | **«tot en un»**: clio **+** emissió; tria el mode amb `CLIO_MODE` |
+
+La imatge «tot en un» executa qualsevol de les dues coses (a més de tota la CLI):
+
+```bash
+docker run clio-stream                 # CLIO_MODE buit  -> serve (com `clio`)
+docker run -e CLIO_MODE=stream ...     #                  -> emissió cap a Twitch
+docker run clio-stream images --limit 200   # qualsevol subordre CLI directe
+```
+
+Per aixecar el directe automatitzat (fent servir les imatges de ghcr.io):
 
 ```bash
 cp .env.example .env    # posa-hi TWITCH_STREAM_KEY=...
-docker compose -f docker-compose.stream.yml up -d --build
+docker compose -f docker-compose.stream.yml pull && docker compose -f docker-compose.stream.yml up -d
 ```
 
+- `docker-compose.stream.yml` — per defecte usa les imatges publicades
+  `ghcr.io/agustim/clio` (servei `clio`) i `ghcr.io/agustim/clio-stream`
+  (servei `stream`, `CLIO_MODE=stream`). Els blocs `build` hi queden comentats
+  per si vols construir-les des d'aquest repo.
 - `scripts/stream.sh` — captura l'overlay i el puja a Twitch, reiniciant ffmpeg si la
   connexió cau. Usa un **perfil de Chromium fresc a cada arrencada** (`CHROME_PROFILE`,
   per defecte `/tmp/clio-chrome`) amb `--no-first-run`, `--no-default-browser-check`
   i `--disable-features=Translate`: garanteix que la finestra kiosk obri només l'overlay,
   sense cap element de Chrome (finestra de navegador per defecte, traducció, pestanya
-  buida "This space intentionally blank…").
-- `Dockerfile.stream` / `docker-compose.stream.yml` — servei `stream` (depèn de `clio`).
-  L'script es copia a la imatge en el build, així que després de tocar-lo cal
+  buida "This space intentionally blank…"). Després de tocar-lo cal
   `docker compose -f docker-compose.stream.yml up -d --build stream`.
 - Variables: `OVERLAY_URL`, `TWITCH_RTMP_URL` (default `rtmp://live.twitch.tv/app`),
   `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k).
@@ -261,17 +280,24 @@ docker compose -f docker-compose.stream.yml up -d --build
 
 ## Docker
 
-Imatge mínima multi-stage ([Dockerfile](Dockerfile)):
+[Dockerfile](Dockerfile) multietapa amb dos targets (tot es construeix des d'aquest repo):
 
 ```bash
-docker build -t clio .
+# Imatge lleugera (clio serve) — la que puja a ghcr.io/agustim/clio
+docker build --target app -t clio .
+# Imatge "tot en un" (serve + stream + CLI) — ghcr.io/agustim/clio-stream
+docker build --target stream -t clio-stream .
+
+# Ús bàsic (qualsevol de les dues): serve + web a :8080, amb data persistida
 docker run -p 8080:8080 \
   -v $PWD/data:/app/data \
   -v $PWD/.fastembed_cache:/app/.fastembed_cache \
   --env-file .env clio
+# Mode emissió (només la "tot en un"): CLIO_MODE=stream + TWITCH_STREAM_KEY
+docker run --rm -e CLIO_MODE=stream --env-file .env clio-stream
 ```
 
-`BIND_ADDR` per defecte dins la imatge és `0.0.0.0:8080` (cal per accedir des de fora del container). Munta `data/` per persistir SQLite i `.fastembed_cache/` per no re-descarregar el model d'embeddings.
+`BIND_ADDR` per defecte dins la imatge és `0.0.0.0:8080` (cal per accedir des de fora del container). Munta `data/` per persistir SQLite (i `data/images/`, les imatges baixades) i `.fastembed_cache/` per no re-descarregar el model d'embeddings.
 
 ## Releases (CI)
 

@@ -1,13 +1,22 @@
-# Emissió headless a Twitch (sense OBS): `clio` serveix l'overlay (/overlay +
-# /overlay/ticker.json) i `stream` el captura (Xvfb + Chromium) i el puja per
-# RTMP amb ffmpeg. 24/7.
+# Emissió headless a Twitch (sense OBS) fent servir les imatges PUBLICADES a
+# ghcr.io (el workflow de release les puja: `clio` = lleugera, `clio-stream` =
+# "tot en un" amb Xvfb+Chromium+ffmpeg).
 #
-# Ús: afegiu TWITCH_STREAM_KEY=... a .env i
-#   docker compose -f docker-compose.stream.yml up -d --build
+# Usos:
+#   docker compose -f docker-compose.stream.yml pull          # baixa les imatges
+#   docker compose -f docker-compose.stream.yml up -d         # aixeca el directe
+#
+# Si prefereixes construir-les des d'aquest repo (en lloc de baixar-les),
+# descomenta els blocs `build` de sota.
+#
+# Recordatori: `clio-stream` s'ha de publicar abans amb una release
+# (`scripts/release.sh patch`) o bé `docker build --target stream -t ghcr.io/agustim/clio-stream:latest .`
 services:
   clio:
-    build: .
     image: ghcr.io/agustim/clio:latest
+    # build:
+    #   context: .
+    #   target: app
     restart: unless-stopped
     env_file: .env
     environment:
@@ -19,18 +28,22 @@ services:
       - ./.fastembed_cache:/app/.fastembed_cache
 
   stream:
-    build:
-      context: .
-      dockerfile: Dockerfile.stream
+    # Imatge "tot en un" (conté clio + Xvfb + Chromium + ffmpeg); el
+    # dispatcher arrenca l'emissió gràcies a CLIO_MODE=stream.
+    image: ghcr.io/agustim/clio-stream:latest
+    # build:
+    #   context: .
+    #   target: stream
     restart: unless-stopped
     depends_on:
       - clio
     environment:
+      CLIO_MODE: stream
       OVERLAY_URL: http://clio:8080/overlay
       TWITCH_RTMP_URL: ${TWITCH_RTMP_URL:-rtmp://live.twitch.tv/app}
       TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:?cal TWITCH_STREAM_KEY a .env}
       # El Chromium kiosk força sempre 1920x1080, per tant l'escena es captura a
-      # 1080p (si la pantalla fossis més petita, el contingut es retallaria).
+      # 1080p (si la pantalla fos més petita, el contingut es retallaria).
       WIDTH: ${OVERLAY_WIDTH:-1920}
       HEIGHT: ${OVERLAY_HEIGHT:-1080}
       FPS: ${OVERLAY_FPS:-30}
