@@ -280,6 +280,228 @@ pub fn clamp_title(s: &str) -> String {
     format!("{}…", cut.trim_end_matches(['.', ',', ' ', '-', ':']))
 }
 
+/// Obertes de metallenguatge que eliminem quan apareixen a l'inici d'un resum
+/// del LLM: «L'anàlisi de l'article...», «L'article descriu...», «En aquest
+/// vídeo...», «Aquest repositori...», labels tipus «Resum:»/«**Resum:**», i els
+/// equivalents en castellà/anglès que els models de vegades barregen. L'objectiu
+/// és que el resum comenci directament per la notícia (prosa periodística).
+const META_OPENINGS: &[&str] = &[
+    // Català. Ordre important: les variants amb verb (que treuen subjecte+verb)
+    // han d'anar abans que el subjecte sol, perquè el primer match guanya.
+    "l'anàlisi de l'article presenta",
+    "l'anàlisi de l'article descriu",
+    "l'anàlisi de l'article explica",
+    "l'anàlisi de l'article analitza",
+    "l'anàlisi de l'article resumeix",
+    "l'anàlisi de l'article",
+    "aquesta anàlisi presenta",
+    "aquesta anàlisi descriu",
+    "aquesta anàlisi explica",
+    "aquesta anàlisi analitza",
+    "aquesta anàlisi es dedica",
+    "aquesta anàlisi",
+    "l'article descriu",
+    "l'article explica",
+    "l'article analitza",
+    "l'article resumeix",
+    "l'article presenta",
+    "l'article tracta",
+    "l'article parla",
+    "l'article aborda",
+    "aquest article descriu",
+    "aquest article explica",
+    "aquest article analitza",
+    "aquest article presenta",
+    "aquest article tracta",
+    "aquest article parla",
+    "en aquest article",
+    "aquest article",
+    "el vídeo descriu",
+    "el vídeo explica",
+    "el vídeo analitza",
+    "el vídeo tracta",
+    "el vídeo parla",
+    "en aquest vídeo",
+    "aquest vídeo",
+    "aquest video",
+    "el vídeo",
+    "el video",
+    "el repositori descriu",
+    "el repositori explica",
+    "el repositori analitza",
+    "el repositori conté",
+    "el repositori ofereix",
+    "aquest repositori",
+    // Castellà / anglès (equivalents que alguns models generen)
+    "el artículo analiza",
+    "el artículo describe",
+    "el artículo explica",
+    "el artículo trata",
+    "este artículo trata",
+    "en este artículo",
+    "este artículo",
+    "este vídeo",
+    "este video",
+    "el vídeo analiza",
+    "el vídeo describe",
+    "el vídeo explica",
+    "el repositorio ofrece",
+    "el repositorio contiene",
+    "el repositorio",
+    "this article describes",
+    "this article explains",
+    "this article analyzes",
+    "in this article",
+    "this article",
+    "the article describes",
+    "the article explains",
+    "the article analyzes",
+    "this video describes",
+    "this video explains",
+    "this video",
+    "the video describes",
+    "the video explains",
+    "this repository",
+    "the repository",
+];
+
+/// Labels de format pur (capçaleres markdown) que no aporten informació i que
+/// traiem si encapçalen un resum (p.ex. «## Resum», «**Resumen:**»).
+const META_LABELS: &[&str] = &[
+    "resum",
+    "resumen",
+    "anàlisi",
+    "anàlisis",
+    "síntesi",
+    "sintesi",
+    "nota",
+];
+
+/// Neteja un resum del LLM perquè comenci directament per la notícia: elimina
+/// capçaleres/labels de format inicials («## Resum», «**Resum:**», llistes
+/// buides...) i frases metalingüístiques del tipus «L'article descriu...»,
+/// «Aquesta anàlisi...». Només actua a l'inici i només sobre text que *presenta*
+/// el contingut: la resta del text no s'edita (fidelitat al contingut).
+pub fn polish_summary(s: &str) -> String {
+    let mut out = s.trim().to_string();
+    // Uns quants passos: les obertures poden estar encadenades o embolicades amb
+    // format (`**Resum:** L'article descriu que ...`).
+    for _ in 0..10 {
+        let before = out.clone();
+        out = strip_leading_meta(&out);
+        if out == before {
+            break;
+        }
+    }
+    out
+}
+
+/// Treu marques de markdown (capçalera/llista/negreta) dels extrems d'una línia.
+fn unwrap_md(s: &str) -> &str {
+    s.trim()
+        .trim_start_matches(|c: char| matches!(c, '#' | '-' | '*' | '+' | '>' | '•' | '·'))
+        .trim_end_matches('*')
+        .trim()
+}
+
+/// Elimina la primera obertura metalingüística (una línia de format, una label
+/// tipus «Resum: X», o un prefix com «L'article descriu que X») i re-capitalitza
+/// el que segueix. Si no n'hi ha cap, retorna el text sense canvis.
+fn strip_leading_meta(s: &str) -> String {
+    let s = s.trim_start();
+    let first = s.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return String::new();
+    }
+
+    // Desembolica marques markdown del començament de la primera línia.
+    let unwrapped = unwrap_md(first);
+    let bare = unwrapped.trim_end_matches(':').trim();
+
+    // (a) Línia de format pur o label sola («## Resum», «- », «**Resum:**»):
+    //     es treu i es continua amb la resta del text.
+    if bare.is_empty() || META_LABELS.contains(&bare.to_lowercase().as_str()) {
+        return s[first.len()..].trim().to_string();
+    }
+
+    // (b) Label encapçalant contingut a la mateixa línia («Resum: X»,
+    //     «## Resum: X», «**Resumen:** X»).
+    if let Some(tail) = meta_label_tail(unwrapped) {
+        return recapitalize(&(tail + &s[first.len()..])).trim().to_string();
+    }
+
+    // (c) Prefix de metallenguatge («L'article descriu que X»).
+    let lower: String = unwrapped.to_lowercase().replace('’', "'");
+    for p in META_OPENINGS {
+        if lower.starts_with(p) {
+            let rest = unwrapped[p.len()..].trim_start_matches(|c: char| {
+                c.is_whitespace() || matches!(c, ':' | '-' | '—' | '–' | '.' | '*' | ',')
+            });
+            // «descriu que X» -> «X» (la conjunció lligava amb el subjecte esborrat).
+            let rest = match rest.strip_prefix("que") {
+                Some(r) => r.trim_start(),
+                None => rest,
+            };
+            return recapitalize(&(rest.to_string() + &s[first.len()..]))
+                .trim()
+                .to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Comprova que `s` comenci pel label ignorant majúscules/minúscules (i accents
+/// bàsics) i retorna la resta de `s` (en la seva caixa original, sense tocar).
+fn strip_label_icase<'a>(s: &'a str, lbl: &str) -> Option<&'a str> {
+    let mut s_chars = s.char_indices();
+    let mut end = 0;
+    for lc in lbl.chars() {
+        let (idx, sc) = s_chars.next()?;
+        match (sc.to_lowercase().next(), lc.to_lowercase().next()) {
+            (Some(a), Some(b)) if a == b => end = idx + sc.len_utf8(),
+            _ => return None,
+        }
+    }
+    Some(&s[end..])
+}
+
+/// Si el text comença amb una label de meta seguida d'un separador i contingut
+/// (p.ex. «resum: el mercat...»), retorna el contingut que segueix el separador.
+fn meta_label_tail(unwrapped: &str) -> Option<String> {
+    for lbl in META_LABELS {
+        let Some(rest) = strip_label_icase(unwrapped, lbl) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(body) = rest
+            .strip_prefix(':')
+            .or_else(|| rest.strip_prefix(" - "))
+            .or_else(|| rest.strip_prefix('-'))
+            .or_else(|| rest.strip_prefix('·'))
+            .or_else(|| rest.strip_prefix('.'))
+            .or_else(|| rest.strip_prefix('—'))
+            .or_else(|| rest.strip_prefix('–'))
+        else {
+            continue;
+        };
+        let body = unwrap_md(body);
+        if body.is_empty() {
+            continue;
+        }
+        return Some(body.to_string());
+    }
+    None
+}
+
+/// Posa en majúscula la primera lletra d'un text (la resta no es toca).
+fn recapitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Pipeline complet per a un link. Actualitza la DB.
 pub async fn process_link(
     db: &Db,
@@ -386,7 +608,12 @@ async fn run_inner(
 
     let analysis = match llm {
         Some(client) => match client.analyze(&title, &text_trunc, cfg.summary_max_chars).await {
-            Ok(a) => a,
+            Ok(mut a) => {
+                // Prosa periodística de sortida: treu els opens metalingüístics
+                // («L'article descriu...», «## Resum»...) que de vegades genera.
+                a.summary = polish_summary(&a.summary);
+                a
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "llm failed, using heuristic fallback");
                 heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars)
@@ -509,5 +736,81 @@ mod tests {
         assert_eq!(image_ext("text/html"), None);
         assert_eq!(image_ext(""), None);
         assert_eq!(image_ext("application/octet-stream"), None);
+    }
+
+    #[test]
+    fn polish_article_opening_is_removed() {
+        // Els opens metalingüístics típics del LLM desapareixen i la notícia
+        // ja comença directament (prosa periodística), re-capitalitzada.
+        assert_eq!(
+            polish_summary("L'article descriu com OpenAI ha publicat el seu nou model."),
+            "Com OpenAI ha publicat el seu nou model."
+        );
+        assert_eq!(
+            polish_summary("L'anàlisi de l'article presenta les claus de la crisi energètica."),
+            "Les claus de la crisi energètica."
+        );
+        assert_eq!(
+            polish_summary("L'article explica que els preus han pujat un 5%."),
+            "Els preus han pujat un 5%."
+        );
+        assert_eq!(
+            polish_summary("En aquest vídeo, el canal analitza la nova versió del compilador."),
+            "El canal analitza la nova versió del compilador."
+        );
+        // La 'que' relativa lligada al subjecte esborrat també es treu.
+        assert_eq!(
+            polish_summary("l'article descriu que els preus han pujat."),
+            "Els preus han pujat."
+        );
+    }
+
+    #[test]
+    fn polish_strips_leading_labels_and_markdown() {
+        // Capçaleres/labels de format inicials s'eliminen, encadenades.
+        assert_eq!(
+            polish_summary("## Resum\n\n**L'article descriu** que plou a Barcelona."),
+            "Plou a Barcelona."
+        );
+        assert_eq!(polish_summary("**Resum:** Els mercats tanquen a la baixa."), "Els mercats tanquen a la baixa.");
+        assert_eq!(polish_summary("Resumen: La UE aprova el paquet de mesures."), "La UE aprova el paquet de mesures.");
+        // '- ' buit inicial també es treu.
+        assert_eq!(polish_summary("- \nLa setmana comença tranquil·la."), "La setmana comença tranquil·la.");
+    }
+
+    #[test]
+    fn polish_keeps_plain_prose_untouched() {
+        // Un resum que ja comença directament per la notícia no es modifica.
+        let s = "La nova llei entrarà en vigor al gener, segons el govern.";
+        assert_eq!(polish_summary(s), s);
+        let s2 = "Els desenvolupadors de Rust publiquen la versió 1.80.";
+        assert_eq!(polish_summary(s2), s2);
+        // Text buit o només metallenguatge no peta.
+        assert_eq!(polish_summary(""), "");
+        assert_eq!(polish_summary("L'article descriu"), "");
+    }
+
+    #[test]
+    fn polish_does_not_mangle_real_labels_or_other_languages() {
+        // «Resumo:» portuguès no és un label nostre: s'ha de deixar igual
+        // (una "o" després de "resum" no ha de caure mai a dins de «resum»).
+        assert_eq!(
+            polish_summary("Resumo: A UE aproba o paquete de medidas."),
+            "Resumo: A UE aproba o paquete de medidas."
+        );
+        // Content headings / etiquetes seguides de text no es toquen.
+        assert_eq!(
+            polish_summary("Nota final: el mercat obre a la baixa."),
+            "Nota final: el mercat obre a la baixa."
+        );
+        assert_eq!(
+            polish_summary("Resum dels 253 patrons de disseny urbà."),
+            "Resum dels 253 patrons de disseny urbà."
+        );
+        // Sí que s'eliminen la label «Nota:» i «Resum:» pures al davant.
+        assert_eq!(
+            polish_summary("Nota: el mercat obre a la baixa."),
+            "El mercat obre a la baixa."
+        );
     }
 }

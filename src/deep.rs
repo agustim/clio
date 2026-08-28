@@ -84,7 +84,7 @@ async fn deep_repo(
         Some(client) => {
             let prompt = repo_prompt(url, &scan, readme.as_deref(), cfg.summary_max_words);
             match client.complete(&prompt).await {
-                Ok(s) => s.trim().to_string(),
+                Ok(s) => pipeline::polish_summary(&s),
                 Err(e) => {
                     tracing::warn!(error = %e, "llm deep repo failed, fallback");
                     repo_fallback(&scan, readme.as_deref())
@@ -288,9 +288,12 @@ fn repo_prompt(url: &str, scan: &CodeScan, readme: Option<&str>, max_words: usiz
         })
         .collect();
     format!(
-        "Ets un enginyer de programari. Analitza aquest repositori i escriu en CATALÀ \
+        "Ets un enginyer de programari. Analitza aquest repositori i escriu EN CATALÀ \
          una anàlisi tècnica de menys de {max_words} paraules: de què va, tecnologies, \
-         arquitectura probable i punts destacables.\n\n\
+         arquitectura probable i punts destacables.\n\
+         IMPORTANT: comença directament pel contingut — no obris mai amb «Aquest repositori \
+         descriu...» ni similars — i sé fidel al codi i al README: no inventis tecnologies ni \
+         característiques que no hi surtin.\n\n\
          REPO: {url}\n\
          FITXERS DE CODI: {files}, LÍNIES TOTALS: {loc}\n\
          LLENGUATGES: {langs}\n\n\
@@ -340,13 +343,18 @@ async fn deep_article(
     let summary = match llm {
         Some(client) => {
             let prompt = format!(
-                "Resumeix en CATALÀ aquest article de manera detallada (anàlisi en profunditat, \
-                 punts clau i conclusions) en menys de {} paraules:\n\n{}",
+                "Escriu EN CATALÀ un resum en prosa periodística d'aquest article (anàlisi en \
+                 profunditat, punts clau i conclusions) en menys de {} paraules.\n\
+                 IMPORTANT: el primer text que escriguis ha de ser directament la notícia o el \
+                 tema — no obris mai amb frases que presentin l'article com «L'article \
+                 descriu...», «Aquest article analitza...», «L'anàlisi de l'article...» ni \
+                 similars. Sé fidel al contingut: no inventis fets, xifres, cites ni opinions \
+                 que no surtin al text.\n\n{}",
                 cfg.summary_max_words * 2,
                 full
             );
             match client.complete(&prompt).await {
-                Ok(s) => s.trim().to_string(),
+                Ok(s) => pipeline::polish_summary(&s),
                 Err(e) => {
                     tracing::warn!(error = %e, "llm deep article failed, fallback");
                     article_fallback(&parsed.text, cfg.summary_max_words * 2)
@@ -390,13 +398,17 @@ async fn deep_video(
         Some(client) if !body.trim().is_empty() => {
             let prompt = format!(
                 "Aquest és un vídeo titulat «{title}» del canal «{channel}». A partir de la \
-                 seva {} següent, fes un resum detallat en CATALÀ (punts clau i conclusions) \
-                 en menys de {} paraules:\n\n{body}",
+                 seva {} següent, escriu EN CATALÀ un resum en prosa periodística (punts clau \
+                 i conclusions) en menys de {} paraules.\n\
+                 IMPORTANT: comença directament pel contingut — no obris amb frases \
+                 metalingüístiques com «El vídeo descriu...», «Aquest vídeo tracta...», \
+                 «L'anàlisi...» ni similars. Sé fidel al contingut: no afegeixis fets ni dades \
+                 que no hi surtin.\n\n{body}",
                 if transcript.is_empty() { "descripció" } else { "transcripció" },
                 cfg.summary_max_words * 2,
             );
             match client.complete(&prompt).await {
-                Ok(s) => s.trim().to_string(),
+                Ok(s) => pipeline::polish_summary(&s),
                 Err(e) => {
                     tracing::warn!(error = %e, "llm deep video failed, fallback");
                     article_fallback(&body, cfg.summary_max_words * 2)

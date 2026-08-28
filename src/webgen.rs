@@ -30,6 +30,8 @@ fn user_dir(name: &str) -> String {
 ///  - data/i/{id}.json                       — fitxa lleugera per enllaç (permalinks)
 ///  - data/deep/{id}.json                    — resum profund (lazy en obrir el detall)
 ///  - data/links.json / links.js             — índex lleuger complet: consum extern + fallback file://
+///  - img/{fname}                            — còpia de les imatges d'acompanyament de les cards
+///    (camp relatiu `img` a l'índex; caiguda a /imgout/{id} o /img?u= si no hi ha còpia local)
 pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
     let links = db.list_links(None, None, None, 100_000).await?;
     let users = db.list_users().await?;
@@ -40,7 +42,7 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
 
     // Directoris derivats: es regeneren sencers a cada `generate`.
     // months/ i emb/ són el layout antic (per mes global): es netegen si queden.
-    for sub in ["data/deep", "data/u", "data/i", "data/months", "data/emb"] {
+    for sub in ["data/deep", "data/u", "data/i", "data/months", "data/emb", "img"] {
         let d = dir.join(sub);
         if d.exists() {
             std::fs::remove_dir_all(&d)?;
@@ -78,6 +80,30 @@ pub async fn generate(db: &Db, cfg: &Config) -> Result<()> {
                 emb = Some(serde_json::json!({ "e": e, "s": s }));
             }
             obj.remove("co_reporters");
+        }
+        // Còpia local de la imatge d'acompanyament dins la web estàtica
+        // (public/img/), perquè les cards de la versió "normal" la puguin mostrar
+        // fins i tot quan la web es serveix sense l'API (git pages, file://...).
+        // L'índex rep el camp relatiu `img`; si no s'ha pogut copiar, el client
+        // cau a /imgout/{id} (API) o al proxy /img?u= (servidor original).
+        if let Some(fname) = l.image_file.as_deref() {
+            let safe = !fname.contains('/')
+                && !fname.contains('\\')
+                && fname != ".."
+                && !fname.contains(".. ");
+            if safe {
+                let src = Path::new(&cfg.images_dir).join(fname);
+                if src.is_file() {
+                    let dst = dir.join("img").join(fname);
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::copy(&src, &dst)?;
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("img".to_string(), serde_json::json!(format!("img/{fname}")));
+                    }
+                }
+            }
         }
         std::fs::write(
             dir.join(format!("data/i/{}.json", l.id)),
@@ -510,6 +536,20 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 }
 .card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: var(--shadow); }
 .card.is-expanded { grid-column: 1 / -1; }
+
+/* Imatge d'acompanyament (og:image / primera imatge de l'article), la mateixa
+   que es desa per a l'overlay. Ocupa tota l'amplada de la card, al capdamunt. */
+.card-img {
+  margin: -1.1rem -1.1rem .1rem;
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+  overflow: hidden; background: var(--bg-soft);
+}
+.card-img a { display: block; }
+.card-img img {
+  display: block; width: 100%; height: 8.5rem; object-fit: cover;
+  transition: transform var(--transition);
+}
+.card:hover .card-img img { transform: scale(1.03); }
 .card-top { display: flex; align-items: center; justify-content: center; gap: .5rem; }
 .card h2 { font-size: 1.04rem; line-height: 1.3; margin: 0; letter-spacing: -.01em; text-align: center;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -1123,12 +1163,134 @@ function cosine(a, b) {
 
 function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// ---- Neteja de resums (prosa periodística en català) ----
+//
+// Treu del resum el metallenguatge amb què de vegades el LLM obre el text
+// («L'article descriu...», «L'anàlisi de l'article...», «## Resum», «**Resum:**»)
+// perquè comenci directament per la notícia. Només actua a l'inici i només sobre
+// text que *presenta* el contingut: no s'edita cap altra part (fidelitat).
+
+const META_OPEN = [
+  // Català (les variants amb verb van abans que el subjecte sol: primer match guanya)
+  /^l['’]anàlisi de l['’]article (presenta|descriu|explica|analitza|resumeix)/i,
+  /^l['’]anàlisi de l['’]article/i,
+  /^aquesta anàlisi (presenta|descriu|explica|analitza)/i,
+  /^aquesta anàlisi/i,
+  /^l['’]article (descriu|explica|analitza|resumeix|presenta|tracta|parla|aborda)/i,
+  /^aquest article (descriu|explica|analitza|presenta|tracta|parla)/i,
+  /^en aquest article/i,
+  /^aquest article/i,
+  /^(el v[ií]deo|el video) (descriu|explica|analitza|tracta|parla)/i,
+  /^en aquest v[ií]deo/i,
+  /^aquest v[ií]deo/i,
+  /^el v[ií]deo/i,
+  /^el repositori (descriu|explica|analitza|conté|ofereix)/i,
+  /^aquest repositori/i,
+  // Castellà / anglès (equivalents que alguns models barregen)
+  /^el art[ií]culo (analiza|describe|explica|trata)/i,
+  /^en este art[ií]culo/i,
+  /^este art[ií]culo/i,
+  /^este v[ií]deo/i,
+  /^el v[ií]deo (analiza|describe|explica)/i,
+  /^this article (describes|explains|analyzes)/i,
+  /^in this article/i,
+  /^this article/i,
+  /^the article (describes|explains|analyzes)/i,
+  /^this video (describes|explains)/i,
+  /^this video/i,
+  /^the video (describes|explains)/i,
+  /^this repository/i,
+  /^the repository/i,
+];
+const META_LABELS_JS = ['resum', 'resumen', 'anàlisi', 'anàlisis', 'síntesi', 'sintesi', 'nota'];
+
+function recap(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
+
+// Treu la primera obertura metalingüística (una línia de format, una label
+// «Resum: X», o un prefix com «L'article descriu que X»). Si no n'hi ha cap,
+// retorna el text sense canvis.
+function stripMetaOpen(t) {
+  const nl = t.indexOf('\n');
+  const firstLine = (nl === -1 ? t : t.slice(0, nl)).trim();
+  const rest2 = nl === -1 ? '' : t.slice(nl);
+  const unwrapped = firstLine.replace(/^[#*\-+>•·]+\s*/, '').replace(/^\*+|\*+$/g, '').trim();
+  const bare = unwrapped.replace(/:+$/, '').trim().toLowerCase();
+
+  // (a) Línia de format pur o label sola («## Resum», «- », «**Resum:**»).
+  if (!bare || META_LABELS_JS.indexOf(bare) !== -1) return rest2.trim();
+
+  // (b) Label encapçalant contingut a la mateixa línia («Resum: X», «## Resum: X»).
+  for (let i = 0; i < META_LABELS_JS.length; i++) {
+    const m = unwrapped.match(new RegExp('^' + META_LABELS_JS[i] + '[:·.—–-]\\s*', 'i'));
+    if (!m) continue;
+    const body = unwrapped.slice(m[0].length)
+      .replace(/^[\s*#>\-+•·]+/, '')
+      .replace(/^\*+|\*+$/g, '')
+      .trim();
+    if (!body) return rest2.trim();
+    return recap(body + rest2);
+  }
+
+  // (c) Prefix de metallenguatge («L'article descriu que X»). Es fa servir la
+  // primera línia desembolicada de markdown (per a «**L'article descriu**…»).
+  for (let i = 0; i < META_OPEN.length; i++) {
+    const m = unwrapped.match(META_OPEN[i]);
+    if (!m || m.index !== 0) continue;
+    let rest = unwrapped.slice(m[0].length)
+      .replace(/^[\s:—–.\-*,]+/, '')
+      .replace(/^\*+|\*+$/g, '')
+      .trim();
+    rest = rest.replace(/^que\s+/i, ''); // «descriu que X» -> «X»
+    if (!rest) return rest2.trim();
+    return recap(rest + rest2);
+  }
+  return t;
+}
+
+// Neteja completa d'un resum: aplica stripMetaOpen repetidament (les obertures
+// poden estar encadenades o embolicades amb format) i retorna el text net.
+function polishSummary(s) {
+  let t = (s || '').trim();
+  if (!t) return '';
+  for (let i = 0; i < 8; i++) {
+    const before = t;
+    t = stripMetaOpen(t);
+    if (t === before) break;
+  }
+  return t.trim();
+}
+
 // Resum curt: explicació de què és, màxim 150 caràcters, sense punts suspensius.
 // L'anàlisi profunda cobreix el text llarg.
 function summaryText(s) {
-  const t = (s || '').trim();
+  const t = polishSummary(s);
   if (!t) return 'Sense resum disponible.';
   return t.length > 150 ? t.slice(0, 150).trimEnd() : t;
+}
+
+// URL de la imatge d'una card, mirall de l'overlay: primer la còpia local dins
+// la web estàtica (data/img), després la còpia de l'API (/imgout/{id}) i, com a
+// últim recurs, el proxy remot (/img?u=). Retorna '' si l'enllaç no té imatge.
+function cardImage(l) {
+  if (l.img) return l.img;
+  if (l.image_file) return '/imgout/' + l.id;
+  if (l.image_url) return '/img?u=' + encodeURIComponent(l.image_url);
+  return '';
+}
+
+// Si una card-img falla (p.ex. web estàtica sense API on no hi ha còpia local),
+// cau un sol cop al proxy remot i, si també falla, amaga la imatge.
+function cardImgFail(img) {
+  const box = img.closest('.card-img');
+  const src = img.getAttribute('src') || '';
+  if (src.indexOf('/imgout/') === 0) {
+    const id = src.slice('/imgout/'.length);
+    const l = ALL.find(x => x.id === id);
+    if (l && l.image_url) { img.src = '/img?u=' + encodeURIComponent(l.image_url); return; }
+  }
+  const proxy = img.getAttribute('data-proxy');
+  if (proxy && src.indexOf('/img?') !== 0) { img.src = proxy; return; }
+  if (box) box.remove();
 }
 
 // Renderitzador de Markdown minimal i segur: s'escapa primer l'HTML i després
@@ -1306,7 +1468,7 @@ async function loadDeep(box) {
     } catch (e) { text = ''; }
     DEEP_CACHE.set(id, text);
   }
-  box.innerHTML = text ? md(text) : '<span class="deep-loading">No disponible.</span>';
+  box.innerHTML = text ? md(polishSummary(text)) : '<span class="deep-loading">No disponible.</span>';
 }
 
 function render() {
@@ -1417,9 +1579,16 @@ function buildCard(l, single) {
       .map(t => `<span class="chip" data-tag="${esc(t)}">#${esc(t)}</span>`).join('');
     const users = reps.slice(0,6)
       .map(u => `<span class="chip user" data-user="${esc(u)}">@${esc(u)}</span>`).join('');
+    const img = cardImage(l);
+    const proxy = l.image_url ? '/img?u=' + encodeURIComponent(l.image_url) : '';
     const card = document.createElement('article');
     card.className = 'card' + (isNew(l) ? ' is-new' : '');
     card.innerHTML = `
+      ${img ? `<div class="card-img">
+        <a href="${esc(l.url)}" target="_blank" rel="noopener" tabindex="-1" aria-hidden="true">
+          <img src="${esc(img)}" alt="" loading="lazy"${proxy ? ` data-proxy="${esc(proxy)}"` : ''} onerror="cardImgFail(this)">
+        </a>
+      </div>` : ''}
       <div class="card-top">
         <h2><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title || l.url)}</a></h2>
       </div>

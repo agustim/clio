@@ -154,6 +154,7 @@ La web gira al voltant de **seguir fonts** (usuaris i NPCs): cada visitant tria 
 - `data/i/{id}.json` — fitxa lleugera per enllaç (permalinks `#id:` de qualsevol font, seguida o no).
 - `data/deep/{id}.json` — resum profund, carregat en obrir l'anàlisi.
 - `data/links.json` + `data/links.js` — índex lleuger complet: consum extern i fallback per a `file://` (on fetch està bloquejat, app.js injecta `links.js`; en aquest mode no hi ha fonts ni historial per mesos).
+- `img/{id}.{ext}` — còpia de les imatges d'acompanyament de les cards (les mateixes que es desen a `IMAGES_DIR` per a l'overlay). Cada card mostra la seva imatge (camp relatiu `img` a l'índex); si no hi ha còpia local, cau a `/imgout/{id}` (API) o al proxy `/img?u=`.
 
 **UI**: chip `👥 N fonts` (o menú «Fonts que segueixes») obre el selector de categories i fonts; chip `📅 fins <mes>`, menú «Historial: un mes més/menys» i botó al final de la graella estiren l'historial. La graella pinta ~60 cards i creix amb scroll (render incremental: no es construeixen milers de cards de cop).
 
