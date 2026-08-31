@@ -280,6 +280,20 @@ pub fn clamp_title(s: &str) -> String {
     format!("{}…", cut.trim_end_matches(['.', ',', ' ', '-', ':']))
 }
 
+/// Deriva un títol (curt, ~80 car.) a partir d'una descripció curta que ja és
+/// en català: fa servir les primeres paraules de la primera frase. Es fa servir
+/// com a salvaguarda de llengua perquè el títol mostrat sigui sempre en català
+/// encara que el LLM no n'hagi generat un (en comptes de caure al títol
+/// original de la pàgina, que podria ser en un altre idioma).
+pub fn title_from_summary(summary: &str) -> String {
+    let words: Vec<&str> = summary.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+    let cut: String = words.iter().take(12).cloned().collect::<Vec<_>>().join(" ");
+    clamp_title(&cut)
+}
+
 /// Obertes de metallenguatge que eliminem quan apareixen a l'inici d'un resum
 /// del LLM: «L'anàlisi de l'article...», «L'article descriu...», «En aquest
 /// vídeo...», «Aquest repositori...», labels tipus «Resum:»/«**Resum:**», i els
@@ -607,28 +621,32 @@ async fn run_inner(
     let text_trunc: String = parsed.text.chars().take(4000).collect();
 
     let analysis = match llm {
-        Some(client) => match client.analyze(&title, &text_trunc, cfg.summary_max_chars).await {
-            Ok(mut a) => {
-                // Prosa periodística de sortida: treu els opens metalingüístics
-                // («L'article descriu...», «## Resum»...) que de vegades genera.
-                a.summary = polish_summary(&a.summary);
-                a
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "llm failed, using heuristic fallback");
-                heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars)
-            }
-        },
+        Some(client) => {
+            // Amb LLM configurat, una fallada NO es camufla amb el fallback
+            // heurístic (que copiaria les primeres frases en l'idioma original
+            // de la pàgina, no en català): es propaga perquè el link quedi en
+            // 'failed' i es pugui reintentar amb «Refer». Les fallades
+            // transitoris ja es reintenten dins de LlmClient::chat.
+            let mut a = client.analyze(&title, &text_trunc, cfg.summary_max_chars).await?;
+            // Prosa periodística de sortida: treu els opens metalingüístics
+            // («L'article descriu...», «## Resum»...) que de vegades genera.
+            a.summary = polish_summary(&a.summary);
+            a
+        }
         None => heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars),
     };
 
-    // Títol: prioritza el curt del LLM; si no, retalla el de la pàgina a ~80 car.
-    let final_title = analysis
-        .title
-        .clone()
-        .or_else(|| parsed.title.clone())
-        .map(|t| clamp_title(&t))
-        .filter(|t| !t.is_empty());
+    // Títol: prioritza el curt del LLM (en català). Si l'LLM no n'ha generat
+    // cap, el derivem de la descripció curta (també en català) per no mostrar
+    // el títol original de la pàgina, que podria ser en un altre idioma. Només
+    // sense LLM es retalla directament el títol de la pàgina.
+    let final_title = match (analysis.title.clone(), llm.is_some()) {
+        (Some(t), _) => Some(t),
+        (_, true) => Some(title_from_summary(&analysis.summary)),
+        (_, false) => parsed.title.clone(),
+    }
+    .map(|t| clamp_title(&t))
+    .filter(|t| !t.is_empty());
 
     Ok((final_title, link_type, analysis, parsed.image))
 }
@@ -788,6 +806,23 @@ mod tests {
         // Text buit o només metallenguatge no peta.
         assert_eq!(polish_summary(""), "");
         assert_eq!(polish_summary("L'article descriu"), "");
+    }
+
+    #[test]
+    fn title_from_summary_uses_first_words() {
+        // S'usa com a títol en català quan l'LLM no n'ha generat cap: primeres
+        // paraules de la descripció curta, sense tallar "3.5" ni paraules pel mig.
+        assert_eq!(
+            title_from_summary("El govern aprova la nova llei d'habitatge i la portarà al Parlament."),
+            "El govern aprova la nova llei d'habitatge i la portarà al Parlament."
+        );
+        assert_eq!(
+            title_from_summary("Les vendes creixen un 3.5% a Catalunya el segon trimestre segons les dades publicades avui pel departament d'economia de la Generalitat de Catalunya."),
+            "Les vendes creixen un 3.5% a Catalunya el segon trimestre segons les"
+        );
+        // Buit o només espais => títol buit (es descarta a run_inner).
+        assert_eq!(title_from_summary(""), "");
+        assert_eq!(title_from_summary("   "), "");
     }
 
     #[test]

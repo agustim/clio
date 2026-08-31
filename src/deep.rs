@@ -83,13 +83,11 @@ async fn deep_repo(
     let summary = match llm {
         Some(client) => {
             let prompt = repo_prompt(url, &scan, readme.as_deref(), cfg.summary_max_words);
-            match client.complete(&prompt).await {
-                Ok(s) => pipeline::polish_summary(&s),
-                Err(e) => {
-                    tracing::warn!(error = %e, "llm deep repo failed, fallback");
-                    repo_fallback(&scan, readme.as_deref())
-                }
-            }
+            // Fallada del LLM => es propaga (el deep queda en 'failed', reintentable
+            // amb «Refer») en lloc de publicar el README original, que podria ser
+            // en un altre idioma. `complete` ja reintenta errors transitoris.
+            let s = client.complete(&prompt).await?;
+            pipeline::polish_summary(&s)
         }
         None => repo_fallback(&scan, readme.as_deref()),
     };
@@ -353,13 +351,11 @@ async fn deep_article(
                 cfg.summary_max_words * 2,
                 full
             );
-            match client.complete(&prompt).await {
-                Ok(s) => pipeline::polish_summary(&s),
-                Err(e) => {
-                    tracing::warn!(error = %e, "llm deep article failed, fallback");
-                    article_fallback(&parsed.text, cfg.summary_max_words * 2)
-                }
-            }
+            // Fallada del LLM => es propaga (el deep queda en 'failed', reintentable
+            // amb «Refer») en lloc d'editar el text original de l'article, que
+            // seria en la llengua de la font.
+            let s = client.complete(&prompt).await?;
+            pipeline::polish_summary(&s)
         }
         None => article_fallback(&parsed.text, cfg.summary_max_words * 2),
     };
@@ -407,13 +403,10 @@ async fn deep_video(
                 if transcript.is_empty() { "descripció" } else { "transcripció" },
                 cfg.summary_max_words * 2,
             );
-            match client.complete(&prompt).await {
-                Ok(s) => pipeline::polish_summary(&s),
-                Err(e) => {
-                    tracing::warn!(error = %e, "llm deep video failed, fallback");
-                    article_fallback(&body, cfg.summary_max_words * 2)
-                }
-            }
+            // Fallada del LLM => es propaga (el deep queda en 'failed', reintentable
+            // amb «Refer») en lloc de publicar la transcripció/descripció original.
+            let s = client.complete(&prompt).await?;
+            pipeline::polish_summary(&s)
         }
         _ => article_fallback(&body, cfg.summary_max_words * 2),
     };

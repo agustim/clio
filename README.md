@@ -53,7 +53,7 @@ LLM_BASE_URL=http://localhost:8000/v1
 LLM_API_KEY=        # opcional (vLLM local sovint no en cal)
 ```
 
-Si l'endpoint no respon o `LLM_PROVIDER=none`, s'usa **fallback extractiu** (3 primeres frases + tags per freqüència + sentiment per lèxic). El resum es demana en català.
+Amb el LLM configurat, el títol, la descripció curta i la profunda es generen **sempre en català** (és una exigència del prompt). Les crides al model es **reintenten** davant errors transitoris; si al final tampoc respon (o respon buit), el link queda com a `failed` (marcat «⚠ Revisa» a la web, reintentable amb «↻ Refer») en lloc de publicar un text en l'idioma original de la pàgina. Només amb `LLM_PROVIDER=none` (sense model) s'usa el **fallback extractiu** (3 primeres frases + tags per freqüència + sentiment per lèxic), que copia l'idioma de la font.
 
 ## Embeddings (ranking personalitzat)
 

@@ -635,6 +635,13 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
   padding: .18rem .42rem; border-radius: 6px;
   color: var(--accent-ink); background: var(--accent);
 }
+/* Anàlisi fallida (potser l'LLM no va respondre): cal tornar a fer «Refer». */
+.badge-fail {
+  flex: none; font-size: .62rem; font-weight: 700; letter-spacing: .06em;
+  padding: .18rem .42rem; border-radius: 6px;
+  color: #ffcf6b; background: color-mix(in srgb, #ff9f43 30%, transparent);
+  border: 1px solid color-mix(in srgb, #ff9f43 55%, transparent);
+}
 .card.is-new { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .card.is-new::before {
   content: ""; position: absolute; inset: 0; border-radius: var(--radius);
@@ -1595,6 +1602,7 @@ function buildCard(l, single) {
       <div class="card-row2">
         <div class="card-row2-left">
           ${isNew(l) ? '<span class="badge-new" title="Nou des de la teva última visita">NOU</span>' : ''}
+          ${l.status === 'failed' ? '<span class="badge badge-fail" title="L\'anàlisi va fallar (l\'LLM potser no va respondre): no s\'ha publicat cap text en un altre idioma. Fes «↻ Refer» per tornar-la a generar.">⚠ Revisa</span>' : ''}
           <span class="badge t-${type}">${type}</span>
           <a class="permalink" href="#id:${esc(l.id)}" title="Enllaç permanent a aquesta card" aria-label="Enllaç permanent">🔗</a>
           ${embAvailable() ? `<button class="heart ${hearts.has(l.id)?'on':''}" data-id="${esc(l.id)}" title="Marca per personalitzar l'ordre" aria-label="M'agrada">♥</button>` : ''}

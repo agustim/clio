@@ -2,6 +2,14 @@ use crate::config::LlmConfig;
 use crate::error::{AppError, Result};
 use crate::models::{Analysis, Sentiment};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Reintents de la crida HTTP al model davant errors transitoris (timeout,
+/// connexions tallades, 5xx...). Amb una fallada persistent no ens quedem amb
+/// un fallback heurístic en l'idioma de la pàgina: l'error es propaga i el
+/// link queda en 'failed' perquè es pugui reintentar amb «Refer».
+const LLM_RETRIES: usize = 2;
+const LLM_RETRY_DELAY_MS: u64 = 500;
 
 /// Client OpenAI-compatible (vLLM / OpenAI / Ollama-openai).
 pub struct LlmClient {
@@ -59,22 +67,51 @@ impl LlmClient {
             messages: vec![Msg { role: "user", content: prompt }],
             temperature: 0.3,
         };
-        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
-        let mut rb = self
-            .http
-            .post(&url)
-            .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
-            .json(&req);
-        if let Some(key) = &self.cfg.api_key {
-            rb = rb.bearer_auth(key);
-        }
-        let resp = rb.send().await?.error_for_status()?;
-        let body: ChatResp = resp.json().await?;
+        let body = self.chat(&req).await?;
         body.choices
             .into_iter()
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| AppError::Pipeline("llm: empty choices".into()))
+    }
+
+    /// Crida HTTP al model amb reintent davant errors transitoris. Si al final
+    /// el model no respon, es retorna l'últim error: el pipeline el tracta com
+    /// a fallada (link 'failed' reintentable) en lloc de publicar un fallback
+    /// heurístic que copiaria el text original en la llengua de la pàgina.
+    async fn chat(&self, req: &ChatReq<'_>) -> Result<ChatResp> {
+        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let mut last: Option<AppError> = None;
+        for attempt in 0..=LLM_RETRIES {
+            let mut rb = self
+                .http
+                .post(&url)
+                .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
+                .json(&req);
+            if let Some(key) = &self.cfg.api_key {
+                rb = rb.bearer_auth(key);
+            }
+            // Bloc async per encadenar send -> error_for_status -> json sense
+            // fer await dins d'un closure no async.
+            let attempt_res = async {
+                let resp = rb.send().await?;
+                let resp = resp.error_for_status()?;
+                resp.json::<ChatResp>().await
+            }
+            .await;
+            match attempt_res {
+                Ok(body) => return Ok(body),
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "llm: crida fallida, es reintenta");
+                    last = Some(e.into());
+                    tokio::time::sleep(Duration::from_millis(
+                        LLM_RETRY_DELAY_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| AppError::Pipeline("llm: sense resposta".into())))
     }
 
     pub async fn analyze(&self, title: &str, text: &str, max_chars: usize) -> Result<Analysis> {
@@ -97,17 +134,7 @@ impl LlmClient {
             messages: vec![Msg { role: "user", content: &prompt }],
             temperature: 0.2,
         };
-        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
-        let mut rb = self
-            .http
-            .post(&url)
-            .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
-            .json(&req);
-        if let Some(key) = &self.cfg.api_key {
-            rb = rb.bearer_auth(key);
-        }
-        let resp = rb.send().await?.error_for_status()?;
-        let body: ChatResp = resp.json().await?;
+        let body = self.chat(&req).await?;
         let content = body
             .choices
             .into_iter()
@@ -129,9 +156,17 @@ impl LlmClient {
             let t = parsed.title.trim();
             if t.is_empty() { None } else { Some(t.to_string()) }
         };
+        let summary = parsed.summary.trim().to_string();
+        // Salvaguarda de llengua: si la resposta és buida (ni títol ni resum),
+        // la tractem com a fallada del LLM. No publiquem cap fallback heurístic
+        // que copiï l'idioma original de la pàgina: l'error es propaga i el
+        // link queda en 'failed', llest per reenquar-se amb «Refer».
+        if title.is_none() && summary.is_empty() {
+            return Err(AppError::Pipeline("llm: resposta buida (sense títol ni resum)".into()));
+        }
         Ok(Analysis {
             title,
-            summary: parsed.summary,
+            summary,
             tags: parsed.tags,
             sentiment,
         })
