@@ -44,6 +44,23 @@ pub enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// Genera els MP3 de la veu dels titulars que en manquin (backfill de TTS).
+    /// Requereix TTS_ENABLED=1 i el servei de veu Edge accessible. Els links
+    /// analitzats des d'ara generen la veu automàticament.
+    Voice {
+        /// Quants links comprovar com a màxim (els més recents primer).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Sintetitza un text en veu (Edge + transform d'àudio) i el desa a un MP3.
+    /// Molt útil per provar config TTS_* sense tocar la base de dades.
+    Say {
+        /// Text a dir (p.ex. "Bon dia, això és una prova").
+        text: String,
+        /// Ruta de sortida (per defecte say.mp3 a la carpeta actual).
+        #[arg(long, default_value = "say.mp3")]
+        out: String,
+    },
     /// Reprocessa links existents (re-analitza => títols curts nous, tags, etc.)
     Reprocess {
         #[arg(long, default_value_t = 1000)]
@@ -197,6 +214,32 @@ pub async fn run(
             );
             Ok(())
         }
+        Cmd::Voice { limit } => {
+            if !state.cfg.tts.enabled() {
+                println!("TTS no activat (TTS_ENABLED=1). Res a fer.");
+                return Ok(());
+            }
+            let (generated, checked) = crate::voice::backfill(&state.db, &state.cfg, limit).await?;
+            println!(
+                "Veu: {generated} MP3 nous generats ({checked} links sense veu comprovats). \
+                 Els analitzats des d'ara generen la veu automàticament."
+            );
+            Ok(())
+        }
+        Cmd::Say { text, out } => {
+            let vcfg = crate::voice::voice_config(&state.cfg);
+            let timeout = std::time::Duration::from_secs(state.cfg.tts.timeout_secs);
+            let bytes = tokio::time::timeout(timeout, clio_voice::synthesize_voice(&text, &vcfg))
+                .await
+                .map_err(|_| AppError::Config("Say: timeout de sintesi".into()))?
+                .map_err(|e| AppError::Config(format!("Say: {e}")))?;
+            std::fs::write(&out, &bytes)?;
+            println!(
+                "MP3 de veu escrit a {out} ({} bytes). Web per escoltar-lo: /audio/…",
+                bytes.len()
+            );
+            Ok(())
+        }
         Cmd::Reprocess { limit, shallow } => {
             let ids = state.db.all_link_ids(limit).await?;
             let total = ids.len();
@@ -336,6 +379,13 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
 
     // Recovery: re-encua feina pendent de la DB.
     state.recover().await?;
+
+    // Música de fons de l'overlay: si no hi ha cap music.mp3 a PUBLIC_DIR, hi
+    // copia el bucle en domini públic d'assets/ (si l'usuari n'ha deixat una,
+    // no el toca).
+    if let Err(e) = webgen::ensure_music(&state.cfg.public_dir) {
+        tracing::warn!(error = %e, "no s'ha pogut assegurar la música de fons; es farà servir silenci");
+    }
 
     // Genera la web un cop a l'arrencada (perquè / mostri alguna cosa).
     if let Err(e) = webgen::generate(&state.db, &state.cfg).await {

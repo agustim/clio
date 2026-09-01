@@ -542,6 +542,9 @@ pub async fn process_link(
                     tracing::warn!(%link_id, error = %e, "no s'ha pogut desar la imatge localment (es farà servir el proxy /img)");
                 }
             }
+            // Veu del titular (best-effort): genera el MP3 que llegirà l'overlay
+            // del directe. Si falla, la notícia simplement no té veu.
+            crate::voice::maybe_generate(db, cfg, link_id, title.as_deref(), link_type).await;
             // Embedding semàntic per al ranking personalitzat (best-effort).
             if let Some(emb) = embedder {
                 let text = embed_source(title.as_deref(), &analysis);

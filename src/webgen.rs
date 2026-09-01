@@ -21,6 +21,21 @@ fn user_dir(name: &str) -> String {
         .collect()
 }
 
+/// Música de fons de l'overlay: si no hi ha cap `music.mp3` a PUBLIC_DIR
+/// (públic, regenerat pel propi servei o muntat), hi copia el bucle en domini
+/// públic que ve a l'imatge/`assets/music.mp3`. NoError si no n'hi ha cap:
+/// l'escena senzillament emet sense música i l'usuari en pot deixar una.
+pub fn ensure_music(public_dir: &str) -> std::io::Result<()> {
+    let dst = Path::new(public_dir).join("music.mp3");
+    if dst.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(public_dir)?;
+    std::fs::copy("assets/music.mp3", &dst)?;
+    tracing::info!(dst = %dst.display(), "música de fons copiada de assets/music.mp3");
+    Ok(())
+}
+
 /// Genera la web estatica a cfg.public_dir.
 ///
 /// Disposició de dades (per usuari/font, pensada per "seguir N fonts"):

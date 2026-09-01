@@ -1,0 +1,23 @@
+[package]
+name = "clio-voice"
+version = "0.1.0"
+edition = "2021"
+description = "TTS (msedge-tts/Edge Read Aloud) + transformacio d'audio per codi en Rust (port de voice-convert)"
+
+[[bin]]
+name = "voice-convert"
+path = "src/bin/voice-convert.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+rustls = { version = "0.23", features = ["ring"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3"] }
+shine-rs = "0.1"
+rustfft = "6"
+num-complex = "0.4"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }

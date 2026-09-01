@@ -230,6 +230,48 @@ linkanalyzer images --limit 200   # 1) extreu og:image pels que en manquin; 2) b
 > la card) i, si no n'hi ha, placeholder del tema. Si vols imatges lliures de risc, pots
 > canviar el fallback a Wikimedia/Openverse (vegeu `src/overlay.rs`).
 
+### Veu dels titulars i música de fons (TTS en català)
+
+Amb `TTS_ENABLED=1`, en analitzar la cua cada titular **noticiós** (News/Article/Blog/Vídeo;
+`TTS_ONLY_NEWS=0` per a tots) genera un **MP3 que el llegeix en català**: la sintesi es fa amb
+les veus Edge "Read Aloud" (protocol websocket + token DRM, port pur Rust) i s'hi aplica la
+mateixa transformació del projecte Node `voice-convert` **sense cap dependència de ffmpeg**
+(`asetrate<rate_factor>` + `atempo<tempo>` → to ×0.75 i dura la meitat, amb resample lineal
+i phase-vocoder fets amb FFT a `voice/src/audio/`). El MP3 es desa a `TTS_DIR` (per defecte
+`data/tts/<link_id>.mp3`).
+
+- `/audio/{id}` — serveix el MP3 de la veu d'un titular (o 404 si no en té).
+- L'escena **llegeix en veu alta els titulars del grup de cards visible** a cada rotació
+  (primera càrrega inclosa), un darrere l'altre amb la pausa `OVERLAY_READ_GAP_MS`; els que
+  encara no tenen MP3 es salten i es tornen a provar poc després (la veu es genera mentre
+  s'analitza la cua).
+- **Música de fons**: un MP3 lliure de drets a `PUBLIC_DIR/music.mp3`; l'escena el
+  reprodueix en bucle a `OVERLAY_MUSIC_VOLUME` (per defecte 0.22) i **baixa el volum a
+  `OVERLAY_MUSIC_DUCK` (per defecte 0.07) mentre es llegeixen els titulars** (ducking suau).
+  El repo porta un bucle per defecte (`assets/music.mp3`, pista "Ambient B" de **FreePD** —
+  domini públic, sense atribució, `freepd.com` / archive.org `freepd`); a cada arrencada
+  `serve` el copia a `PUBLIC_DIR/music.mp3` si no n'hi cap. Per canviar-la, substituïu
+  `public/music.mp3` (o `assets/music.mp3`) per qualsevol MP3 lliure de drets.
+- El toc del directe és **configurable**: `TTS_VOICE` (`ca-ES-JoanaNeural`,
+  `ca-ES-AlbaNeural`), `TTS_RATE_FACTOR`, `TTS_TEMPO`, `TTS_TARGET_RATE`, `TTS_KBPS`,
+  `TTS_TIMEOUT_SECS`.
+
+Backfill per als links ja processats (sense re-analitzar res):
+
+```bash
+linkanalyzer voice --limit 200    # genera els MP3 que en manquin
+linkanalyzer say "Bon dia, això és una prova" --out proba.mp3   # prova ràpida de veu
+```
+
+> La veu i la música de l'escena poden sonar directament a l'emissió headless: `stream.sh`
+> arranca PulseAudio (sink nul `clio_out`), el Chromium hi envia el so de l'overlay
+> (`--autoplay-policy=no-user-gesture-required`) i ffmpeg captura `clio_out.monitor`; si no
+> hi ha PulseAudio es manté el silenci (`anullsrc`).
+>
+> **Manteniment Edge**: el servei Edge rota el seu token DRM de tant en tant. Si la sintesi
+> comença a retornar 403, actualitza `CHROMIUM_FULL_VERSION` / `SEC_MS_GEC_VERSION` (i el
+> `TrustedClientToken`) a `voice/src/edge.rs`.
+
 ### Emetre amb OBS (ràpid, semiautomàtic)
 
 1. `linkanalyzer serve` (o el desplegament).

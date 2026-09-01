@@ -121,6 +121,11 @@ pub struct Link {
     /// l'overlay la serveix des de /imgout/{id} en lloc del proxy remot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_file: Option<String>,
+    /// MP3 de la veu del titular (TTS), dins de TTS_DIR (p.ex.
+    /// `data/tts/<link_id>.mp3`), servit a /audio/{id}. L'overlay el llegeix
+    /// en directe. Buit = sense veu per a aquesta notícia.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_file: Option<String>,
     /// Embedding quantitzat (int8) per al ranking personalitzat a la web.
     /// `e` = vector i8; `s` = factor de dequantització (f32 ≈ e[i] * s).
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]

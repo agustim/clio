@@ -68,6 +68,9 @@ fn item(l: &Link) -> Value {
         "sentiment": l.sentiment.as_str(),
         "source": source,
         "image": image_for(l),
+        // MP3 de la veu del titular (si en té). La core el llegeix en veu
+        // alta dins del grup de cards; si buit, salta aquesta notícia.
+        "audio": l.audio_file.as_ref().map(|_| format!("/audio/{}", l.id)),
         // Dia i hora de la notícia (quan es va recollir). S'envia com a RFC3339
         // (UTC) i el navegador el mostra en hora local de l'emissió, com el rellotge.
         "date": l.created_at.to_rfc3339(),
@@ -244,6 +247,10 @@ pub fn overlay_html(cfg: &Config) -> String {
         .replace("{{LINES}}", &cfg.overlay_text_lines.max(1).to_string())
         // Finestra (minuts) per marcar una notícia com a NOVA; 0 = desactivada.
         .replace("{{NEW_MIN}}", &cfg.overlay_new_minutes.to_string())
+        // Veu dels titulars + música de fons de l'escena.
+        .replace("{{MUSIC_VOL}}", &format!("{:.2}", cfg.overlay_music_volume))
+        .replace("{{MUSIC_DUCK}}", &format!("{:.2}", cfg.overlay_music_duck))
+        .replace("{{READ_GAP}}", &cfg.overlay_read_gap_ms.to_string())
         // TimeZone IANA (JSON-quoted) per a les hores de l'escena; "" = hora local.
         .replace(
             "{{TIMEZONE}}",
@@ -421,6 +428,12 @@ const TZ_OPT = TZ ? { timeZone: TZ } : {};
 const NEW_MIN = Math.max(0, {{NEW_MIN}});
 const NEW_MS = NEW_MIN * 60 * 1000;
 
+// Veu dels titulars + música de fons de l'escena (fitxer public/music.mp3,
+// lliure de drets; OVERLAY_MUSIC_* en configura-la).
+const MUSIC_VOL  = parseFloat({{MUSIC_VOL}});   // volum normal de música
+const MUSIC_DUCK = parseFloat({{MUSIC_DUCK}});  // volum mentre es llegeixen titulars
+const READ_GAP   = Math.max(0, parseInt({{READ_GAP}}, 10) || 400); // pausa entre titulars (ms)
+
 let ITEMS = [];
 let idx = 0;
 
@@ -490,7 +503,110 @@ function renderCards() {
 }
 // Rotació: tota la graella avança de cop, saltant de CARDS en CARDS (no va
 // lliscant d'un en un): cada minut/rotació es veuen X notícies completament noves.
-setInterval(() => { idx = (idx + CARDS) % ITEMS.length; renderCards(); }, ROTATE);
+setInterval(() => { idx = (idx + CARDS) % ITEMS.length; renderCards(); maybeReadGroup(); }, ROTATE);
+
+// ---- Veu dels titulars (lectura per grups) + música de fons ----
+// Música de fons: llarga, en bucle, lliure de drets (el mateix usuari la deixa
+// a public/music.mp3). Baixa de volum mentre es llegeixen els titulars (ducking).
+const MUSIC = new Audio('/music.mp3');
+MUSIC.loop = true;
+MUSIC.preload = 'auto';
+MUSIC.volume = MUSIC_VOL;   // abans de cap play, per si mai arrenca a més volum
+let musicOn = false;      // cert només quan la música ha arrencat de veritat
+let reading = false;      // cert mentre s'està llegint un grup
+let lastGroupKey = '';    // grup ja llegit (per no repetir-lo si torna seguit)
+let audioQueue = [];      // MPs pendents de llegir en seqüència
+let missingIds = [];      // ids del grup actual que encara no tenen veu (reintent)
+
+// Autoplay robust: Chrome pot rebutjar el primer play() (política d'autoplay
+// amb so). En lloc de rendir-se, ho reintentem cada pocs segons i també ens
+// desbloquegem amb el primer gest de l'usuari (clic/tocar/tecla). Amb el flag
+// --autoplay-policy=no-user-gesture-required (mode headless/stream.sh) el
+// primer play ja funciona; la resta són xarxes de seguretat (OBS/navegador).
+MUSIC.addEventListener('canplay', () => { musicOn = true; tryMusic(); });
+MUSIC.addEventListener('error', () => { musicOn = false; });
+function tryMusic(){
+  if (MUSIC.paused) MUSIC.play().catch(() => { /* encara no permès; reintentarem */ });
+}
+function startMusic(){
+  MUSIC.load();
+  setInterval(tryMusic, 5000);
+}
+// Primer gest de l'usuari → desbloqueja música i veu (navegador normal).
+function unlockAudio(){
+  tryMusic();
+  if (VOICE.src && VOICE.paused) VOICE.play().catch(() => {});
+}
+['pointerdown','keydown','touchstart'].forEach(ev =>
+  window.addEventListener(ev, unlockAudio, { once:true, passive:true }));
+
+// Suavitza la baixada/pujada de la música (1 cops/frame fins al volum objectiu).
+function rampTo(target){
+  const cur = MUSIC.volume;
+  const step = (target > cur) ? 0.0012 : -0.0022;
+  const next = step > 0 ? Math.min(target, cur + step) : Math.max(target, cur + step);
+  MUSIC.volume = Math.round(next * 1000) / 1000;
+  if (musicOn && Math.abs(MUSIC.volume - target) > 0.005) requestAnimationFrame(() => rampTo(target));
+}
+function duckForSpeech(voice){
+  const target = voice ? MUSIC_DUCK : MUSIC_VOL;
+  if (musicOn) requestAnimationFrame(() => rampTo(target));
+}
+
+// Cua de reproducció: un titular rere l'altre, amb la pausa configurada.
+const VOICE = new Audio();
+VOICE.preload = 'auto';
+function playQueue(){
+  if (!audioQueue.length){ reading = false; duckForSpeech(false); return; }
+  const url = audioQueue.shift();
+  reading = true;
+  duckForSpeech(true);
+  VOICE.src = url;
+  const next = () => { VOICE.onended = VOICE.onerror = null; setTimeout(() => playQueue(), READ_GAP); };
+  VOICE.onended = next;
+  VOICE.onerror = next;
+  VOICE.play().catch(next);
+}
+
+// Grup actualment visible a la graella (les CARDS que es mostren).
+function visibleGroup(){
+  const out = [];
+  for (let i = 0; i < CARDS && ITEMS.length; i++) out.push(ITEMS[(idx + i) % ITEMS.length]);
+  return out;
+}
+// Llegeix el grup visible (els que tenen veu; els que no, els saltem). No es
+// torna a llegir el mateix grup seguit. Els ítems sense veu encara es tornen
+// a provar aviat (l'MP3 es genera mentre s'analitza la cua).
+function maybeReadGroup(force){
+  if (reading) return; // no interrompem el grup en curs
+  const group = visibleGroup();
+  const key = group.map(l => l.id).join(',');
+  if (!force && key === lastGroupKey) return;
+  lastGroupKey = key;
+  const urls = group.filter(l => l.audio).map(l => l.audio);
+  missingIds = group.filter(l => !l.audio).map(l => l.id);
+  if (urls.length){ audioQueue = urls.slice(); playQueue(); }
+  scheduleMissingRetry();
+}
+let missingTimer = null;
+function scheduleMissingRetry(){
+  if (missingTimer) clearTimeout(missingTimer);
+  if (!missingIds.length) return;
+  missingTimer = setTimeout(() => {
+    missingTimer = null;
+    if (reading) return;
+    // Reintenta els ítems d'aquest grup que encara no tenien veu: potser el
+    // MP3 s'ha generat mentre re-carregàvem el ticker.
+    const ready = missingIds
+      .map(id => ITEMS.find(x => x.id === id))
+      .filter(l => l && l.audio);
+    missingIds = [];
+    if (ready.length){
+      audioQueue = ready.map(l => l.audio).slice();
+      playQueue();
+    }
+  }, 20000);
+}
 
 // ---- Crawl inferior ----
 function renderCrawl() {
@@ -509,6 +625,7 @@ function renderCrawl() {
 }
 
 // ---- Dades ----
+let musicStarted = false;
 async function load() {
   try {
     const r = await fetch('/overlay/ticker.json?v=' + DATAV, { cache:'no-store' });
@@ -518,7 +635,9 @@ async function load() {
       ITEMS = j.items;
       if (idx >= ITEMS.length) idx = 0;
       renderCards();
+      maybeReadGroup();
       if (!same) renderCrawl();
+      if (!musicStarted) { musicStarted = true; startMusic(); }
     }
   } catch (e) { console.warn('ticker', e); }
 }
@@ -589,6 +708,18 @@ mod tests {
                 "card i crawl marquen la notícia nova");
         assert!(OVERLAY_HTML.contains("badge-new") && OVERLAY_HTML.contains("card.new"),
                 "la notícia nova té marc i etiqueta NOU");
+        // Veu dels titulars + música de fons: la core llegeix el grup visible
+        // i la música fa ducking mentre parla.
+        assert!(OVERLAY_HTML.contains("maybeReadGroup()"),
+                "la rotació re-llança la lectura del grup");
+        assert!(OVERLAY_HTML.contains("/music.mp3"),
+                "la música de fons ve de public/music.mp3");
+        assert!(OVERLAY_HTML.contains("MUSIC_DUCK") && OVERLAY_HTML.contains("duckForSpeech"),
+                "ducking de la música mentre es llegeixen titulars");
+        assert!(OVERLAY_HTML.contains("{{MUSIC_VOL}}")
+                && OVERLAY_HTML.contains("{{MUSIC_DUCK}}")
+                && OVERLAY_HTML.contains("{{READ_GAP}}"),
+                "els paràmetres de veu/música s'injecten des de config");
     }
 
     /// Cada element del ticker porta la data/hora (RFC3339) de la notícia.
@@ -611,6 +742,7 @@ mod tests {
             code_stats: None,
             image_url: None,
             image_file: None,
+            audio_file: Some("t.mp3".into()),
             embedding: None,
             embed_scale: None,
             created_at: chrono::DateTime::parse_from_rfc3339("2025-08-27T09:48:00Z")
@@ -621,6 +753,38 @@ mod tests {
         let v = item(&link);
         assert_eq!(v["date"], "2025-08-27T09:48:00+00:00");
         assert_eq!(v["link_type"], "article");
+        // Amb audio_file, la card porta la URL del MP3 de la veu.
+        assert_eq!(v["audio"], format!("/audio/{}", link.id));
+    }
+
+    /// Sense audio_file, la card no ofereix veu (camp buit).
+    #[test]
+    fn ticker_item_audio_null_without_file() {
+        use crate::models::{DeepStatus, LinkStatus, LinkType, Sentiment};
+        let link = Link {
+            id: uuid::Uuid::new_v4(),
+            url: "https://example.com/x".into(),
+            title: Some("títol".into()),
+            summary: None,
+            link_type: LinkType::News,
+            tags: vec![],
+            sentiment: Sentiment::Neutral,
+            status: LinkStatus::Done,
+            co_reporters: vec![],
+            reporters: vec![],
+            deep_status: DeepStatus::Done,
+            deep_summary: Some("anàlisi".into()),
+            code_stats: None,
+            image_url: None,
+            image_file: None,
+            audio_file: None,
+            embedding: None,
+            embed_scale: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let v = item(&link);
+        assert!(v["audio"].is_null(), "sense fitxer no hi ha veu");
     }
 
     /// `overlay_html` injecta la TimeZone i la finestra de "nova" al JS.
@@ -636,6 +800,18 @@ mod tests {
         assert!(
             html.contains("const NEW_MIN = Math.max(0, 30);"),
             "per defecte la finestra de nova és 30 minuts"
+        );
+        assert!(
+            html.contains("const MUSIC_VOL  = parseFloat(0.22);"),
+            "volum de música per defecte 0.22"
+        );
+        assert!(
+            html.contains("const MUSIC_DUCK = parseFloat(0.07);"),
+            "ducking per defecte 0.07"
+        );
+        assert!(
+            html.contains("const READ_GAP   = Math.max(0, parseInt(500, 10) || 400);"),
+            "pausa entre titulars per defecte 500 ms"
         );
 
         std::env::set_var("OVERLAY_TIMEZONE", "Europe/Andorra");
@@ -680,6 +856,7 @@ mod tests {
             code_stats: None,
             image_url: image_url.map(String::from),
             image_file: image_file.map(String::from),
+            audio_file: None,
             embedding: None,
             embed_scale: None,
             created_at: chrono::Utc::now(),

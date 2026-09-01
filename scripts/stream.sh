@@ -95,11 +95,34 @@ PREF
     --no-first-run --no-default-browser-check --disable-session-crashed-bubble \
     --disable-infobars --password-store=basic --check-for-update-interval=315360000 \
     --disable-features=Translate \
+    --autoplay-policy=no-user-gesture-required \
     --lang=ca \
     --user-data-dir="$CHROME_PROFILE" \
     --window-size="${W},${H}" --window-position=0,0 --force-device-scale-factor=1 \
     --kiosk "$OVERLAY_URL" &
   CPID=$!
+}
+
+# Àudio de l'escena -> PulseAudio. El Chromium hi envia la música de fons i la
+# veu dels titulars; ffmpeg captura el *monitor* d'un sink nul ("clio_out").
+# Sense pulseaudio (o sense monitor), l'emissió continua en silenci (anullsrc).
+AUDIO_DISABLED=1
+start_audio() {
+  command -v pulseaudio >/dev/null 2>&1 || { echo "avís: sense pulseaudio; emissió sense àudio." >&2; return 0; }
+  pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit \
+    --load="module-null-sink sink_name=clio_out sink_properties=device.description=ClioOut" \
+    --load="module-always-sink" 2>/dev/null || true
+  sleep 1
+  if command -v pactl >/dev/null 2>&1; then
+    pactl set-default-sink clio_out 2>/dev/null || true
+    pactl set-sink-volume clio_out 100% 2>/dev/null || true
+  fi
+  if pactl list short sources 2>/dev/null | grep -q 'clio_out.monitor'; then
+    AUDIO_DISABLED=0
+    echo "Àudio de l'escena actiu (PulseAudio -> clio_out.monitor)."
+  else
+    echo "avís: no trobo clio_out.monitor; emissió sense àudio." >&2
+  fi
 }
 
 # Garanteix que la finestra kiosk cobreixi tota la pantalla (0,0 WxH). Sense
@@ -123,6 +146,7 @@ apply_window_geometry() {
 }
 start_chromium
 apply_window_geometry
+start_audio
 sleep 2
 
 # Prova ràpida (1 frame, sense escriure cap fitxer) de codificar H.264 via
@@ -197,8 +221,14 @@ while true; do
   FFARGS=(
     -hide_banner -loglevel warning
     -f x11grab -video_size "${W}x${H}" -framerate "$FPS" -draw_mouse 0 -i "$DISPLAY"
-    -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100"
   )
+  # Àudio real (monitor de PulseAudio) si hi és; sinó silenci (anullsrc). Amb
+  # aquest ordre ffmpeg obre l'àudio abans del vídeo; és indiferent pel flux.
+  if [ "$AUDIO_DISABLED" = 0 ]; then
+    FFARGS+=(-f pulse -i clio_out.monitor)
+  else
+    FFARGS+=(-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100")
+  fi
   if [ "$VENC" = vaapi ]; then
     # Codificació a la GPU (AMD/Intel via VAAPI): allibera la CPU que abans
     # gastava libx264. La conversió a nv12 + hwupload la fa ffmpeg a la CPU

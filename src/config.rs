@@ -47,6 +47,39 @@ impl EmbedConfig {
     }
 }
 
+/// Configuració de la veu de titulars (TTS Edge Read Aloud + transformació
+/// d'àudio per codi). Genera un MP3 per a cada notícia analitzada perquè
+/// l'overlay del directe la llegeixi (vegeu el crate `clio-voice`).
+#[derive(Debug, Clone)]
+pub struct TtsConfig {
+    /// TTS_ENABLED=1 -> es generen MP3 dels titulars en analitzar la cua.
+    pub enabled: bool,
+    /// Veu Edge (per defecte ca-ES-JoanaNeural; ca-ES-AlbaNeural es l'altra ca).
+    pub voice: String,
+    /// BCP-47 de la llengua (per defecte ca-ES).
+    pub lang: String,
+    /// to: `asetrate<rate_factor>` (0.75 => veu mes greu).
+    pub rate_factor: f64,
+    /// velocitat: `atempo<tempo>` (2.0 => el doble de rapida).
+    pub tempo: f64,
+    /// sample rate de sortida del transform (24000).
+    pub target_rate: u32,
+    /// bitrate del MP3 final (48).
+    pub kbps: u32,
+    /// Carpeta on es desen els MP3 (p.ex. data/tts). Se serveixen a /audio/{id}.
+    pub dir: String,
+    /// Timeout per la sintesi + transform d'un titular (segons).
+    pub timeout_secs: u64,
+    /// Només per a tipus noticiosos (News|Article|Blog|Video). 0 = tots.
+    pub only_news: bool,
+}
+
+impl TtsConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GitConfig {
     pub web_repo_url: Option<String>,
@@ -77,6 +110,8 @@ pub struct Config {
     /// `/imgout/{id}`; si no hi ha còpia local, l'overlay fa servir el proxy
     /// remot `/img?u=`.
     pub images_dir: String,
+    /// Veu de titulars (TTS). Inactiu per defecte: cal TTS_ENABLED=1.
+    pub tts: TtsConfig,
     pub max_link_size_bytes: usize,
     /// Límit de paraules per a l'anàlisi profunda (deep) i fallbacks d'article.
     pub summary_max_words: usize,
@@ -123,6 +158,12 @@ pub struct Config {
     /// Finestra (minuts) durant la qual una notícia es marca com a NOVA a
     /// l'overlay (marc vermell + cintó). 0 = desactiva la marca.
     pub overlay_new_minutes: u64,
+    /// Volum de la música de fons de l'escena (0.0-1.0).
+    pub overlay_music_volume: f32,
+    /// Volum de la música mentre es llegeixen els titulars (ducking; 0.0-1.0).
+    pub overlay_music_duck: f32,
+    /// Pausa (ms) entre la lectura d'un titular i el següent dins el mateix grup.
+    pub overlay_read_gap_ms: u64,
 }
 
 fn opt(key: &str) -> Option<String> {
@@ -184,6 +225,34 @@ impl Config {
         let overlay_new_minutes: u64 = get("OVERLAY_NEW_MINUTES", "30")
             .parse()
             .map_err(|_| AppError::Config("OVERLAY_NEW_MINUTES invalid".into()))?;
+        let overlay_music_volume: f32 = get("OVERLAY_MUSIC_VOLUME", "0.22")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_MUSIC_VOLUME invalid".into()))?;
+        let overlay_music_duck: f32 = get("OVERLAY_MUSIC_DUCK", "0.07")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_MUSIC_DUCK invalid".into()))?;
+        let overlay_read_gap_ms: u64 = get("OVERLAY_READ_GAP_MS", "500")
+            .parse()
+            .map_err(|_| AppError::Config("OVERLAY_READ_GAP_MS invalid".into()))?;
+
+        // Veu de titulars (TTS).
+        let tts_enabled = get("TTS_ENABLED", "0") != "0";
+        let tts_rate_factor: f64 = get("TTS_RATE_FACTOR", "0.75")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_RATE_FACTOR invalid".into()))?;
+        let tts_tempo: f64 = get("TTS_TEMPO", "2.0")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_TEMPO invalid".into()))?;
+        let tts_target_rate: u32 = get("TTS_TARGET_RATE", "24000")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_TARGET_RATE invalid".into()))?;
+        let tts_kbps: u32 = get("TTS_KBPS", "48")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_KBPS invalid".into()))?;
+        let tts_timeout_secs: u64 = get("TTS_TIMEOUT_SECS", "20")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_TIMEOUT_SECS invalid".into()))?;
+        let tts_only_news = get("TTS_ONLY_NEWS", "1") != "0";
 
         // LLM de chat.
         let llm_provider = get("LLM_PROVIDER", "none");
@@ -223,6 +292,18 @@ impl Config {
             admin_chat_id: opt("ADMIN_CHAT_ID").and_then(|s| s.parse().ok()),
             public_dir: get("PUBLIC_DIR", "public"),
             images_dir: get("IMAGES_DIR", "data/images"),
+            tts: TtsConfig {
+                enabled: tts_enabled,
+                voice: get("TTS_VOICE", "ca-ES-JoanaNeural"),
+                lang: get("TTS_LANG", "ca-ES"),
+                rate_factor: tts_rate_factor,
+                tempo: tts_tempo,
+                target_rate: tts_target_rate,
+                kbps: tts_kbps,
+                dir: get("TTS_DIR", "data/tts"),
+                timeout_secs: tts_timeout_secs,
+                only_news: tts_only_news,
+            },
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
             summary_max_chars,
@@ -247,6 +328,9 @@ impl Config {
             overlay_text_lines,
             overlay_timezone,
             overlay_new_minutes,
+            overlay_music_volume: overlay_music_volume.clamp(0.0, 1.0),
+            overlay_music_duck: overlay_music_duck.clamp(0.0, 1.0),
+            overlay_read_gap_ms,
         })
     }
 }

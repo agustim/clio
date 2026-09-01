@@ -68,6 +68,7 @@ impl Db {
             ("008_fail_counts", include_str!("../migrations/008_fail_counts.sql")),
             ("009_overlay", include_str!("../migrations/009_overlay.sql")),
             ("010_image_file", include_str!("../migrations/010_image_file.sql")),
+            ("011_audio", include_str!("../migrations/011_audio.sql")),
         ];
 
         for (name, sql) in migrations {
@@ -489,6 +490,7 @@ impl Db {
             code_stats,
             image_url: r.get("image_url"),
             image_file: r.get("image_file"),
+            audio_file: r.get("audio_file"),
             embedding,
             embed_scale,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
@@ -496,7 +498,7 @@ impl Db {
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, image_file, embedding, embed_scale, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, image_file, audio_file, embedding, embed_scale, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -648,6 +650,18 @@ impl Db {
     /// `None` ho neteja (es torna al proxy remot).
     pub async fn set_link_image_file(&self, link_id: Uuid, file: Option<&str>) -> Result<()> {
         sqlx::query("UPDATE links SET image_file = ?, updated_at = ? WHERE id = ?")
+            .bind(file)
+            .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Desa el nom del fitxer MP3 de la veu del titular (dins de TTS_DIR).
+    /// `None` ho neteja (la notícia torna a no tenir veu).
+    pub async fn set_link_audio_file(&self, link_id: Uuid, file: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE links SET audio_file = ?, updated_at = ? WHERE id = ?")
             .bind(file)
             .bind(now_str())
             .bind(link_id.to_string())

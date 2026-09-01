@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlay/ticker.json", get(overlay_ticker))
         .route("/img", get(img_proxy))
         .route("/imgout/:id", get(img_local))
+        .route("/audio/:id", get(audio_local))
         // Tot el que no és /api cau a la web estàtica.
         .fallback_service(static_files)
         .layer(TraceLayer::new_for_http())
@@ -414,6 +415,42 @@ async fn img_local(
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, ct.to_string()),
+            (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Serveix el MP3 de la veu d'un titular (/audio/{id}), desat a TTS_DIR mentre
+/// s'analitzava la cua. L'overlay el llegeix dins del grup de cards. Si no n'hi
+/// ha, 404 → la card simplement no es llegeix en veu alta.
+async fn audio_local(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| AppError::BadRequest("bad id".into()))?;
+    let link = state.db.link_by_id(uuid).await?.ok_or(AppError::NotFound)?;
+    let Some(name) = link.audio_file else {
+        return Err(AppError::NotFound); // sense veu per a aquesta notícia
+    };
+    // Nom de fitxer segur: un sol component (basename), sense ".." ni "/".
+    if name.contains('/') || name.contains('\\') || name == ".." || name.contains(".. ") {
+        return Err(AppError::NotFound);
+    }
+    if std::path::Path::new(&name).file_name().and_then(|f| f.to_str()) != Some(name.as_str()) {
+        return Err(AppError::NotFound);
+    }
+    let path = std::path::Path::new(&state.cfg.tts.dir).join(&name);
+    let bytes = std::fs::read(&path).map_err(|_| AppError::NotFound)?;
+    if bytes.is_empty() {
+        return Err(AppError::NotFound);
+    }
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "audio/mpeg".to_string()),
+            (header::CONTENT_LENGTH, bytes.len().to_string()),
             (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
         ],
         bytes,

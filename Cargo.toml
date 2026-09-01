@@ -1,3 +1,7 @@
+[workspace]
+members = ["voice"]
+resolver = "2"
+
 [package]
 name = "linkanalyzer"
 version = "0.1.33"
@@ -29,11 +33,11 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dotenvy = "0.15"
 thiserror = "1"
 async-trait = "0.1"
 feed-rs = "2.3.1"
 regex = "1"
+clio-voice = { path = "voice" }
 
 [profile.release]
 opt-level = 2

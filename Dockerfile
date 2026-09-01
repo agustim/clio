@@ -21,6 +21,7 @@ FROM rust:1-trixie AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY voice ./voice
 COPY migrations ./migrations
 RUN cargo build --release --bin linkanalyzer
 
@@ -31,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # public/ no es copia: serve el regenera a l'arrencada (HTML/CSS/JS incrustats al binari).
+# assets/ sí es copia: conté la música de fons de l'overlay en domini públic
+# (serve la copia a public/music.mp3 si no n'hi ha cap).
+COPY assets ./assets
 COPY --from=build /app/target/release/linkanalyzer /usr/local/bin/linkanalyzer
 RUN mkdir -p data public
 ENV BIND_ADDR=0.0.0.0:8080 \
@@ -53,6 +57,7 @@ FROM app AS stream
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb chromium xdotool ffmpeg curl \
         libva2 libva-drm2 mesa-va-drivers intel-media-va-driver vainfo \
+        pulseaudio pulseaudio-utils libpulse0 \
         fonts-noto-color-emoji fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/stream.sh /usr/local/bin/stream.sh

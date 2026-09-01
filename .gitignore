@@ -1,7 +1,10 @@
 /target
+/voice/target
+/voice/Cargo.lock
 /data
 /public
 .env
 /.fastembed_cache
 /.claude/
 /.smoke*
+/.cargo-home
