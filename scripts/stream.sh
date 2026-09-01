@@ -18,6 +18,14 @@
 #                     més petita, el contingut es RETALLA. Per tant l'escena es
 #                     dissenya a 1080p i aquí es captura a 1080p.)
 #   VIDEO_BITRATE    (default 5000k; max recomanat per Twitch ~6000k a 1080p)
+#   ENCODER          Codificador de vídeo: 'software' (libx264, CPU), 'vaapi'
+#                    (h264_vaapi, GPU AMD/Intel via VAAPI) o 'auto' (prova
+#                    vaapi i cau a libx264 si la GPU no està disponible).
+#                    Per defecte: auto.
+#   VAAPI_DEVICE     Node DRM de render per a VAAPI (default /dev/dri/renderD128);
+#                    cal que estigui muntat dins del container i tenir-hi els
+#                    drivers VAAPI (mesa-va-drivers). Si el node no existeix o
+#                    el driver falla, es fa fallback a libx264.
 set -euo pipefail
 
 OVERLAY_URL="${OVERLAY_URL:-http://127.0.0.1:8080/overlay}"
@@ -26,6 +34,8 @@ KEY="${TWITCH_STREAM_KEY:-}"
 W="${WIDTH:-1920}"; H="${HEIGHT:-1080}"; FPS="${FPS:-30}"
 VBR="${VIDEO_BITRATE:-5000k}"
 BUF="${BUF:-10000k}"
+ENCODER="${ENCODER:-auto}"
+VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
 DISPLAY=:99
 CHROME_PROFILE="${CHROME_PROFILE:-/tmp/clio-chrome}"
 
@@ -106,16 +116,66 @@ start_chromium
 apply_window_geometry
 sleep 2
 
+# Prova ràpida (1 frame, sense escriure cap fitxer) que el node de render
+# realment pot codificar H.264 via VAAPI: si no, per a 24/7 és molt millor
+# funcionar amb libx264 que morir al primer frame de l'emissió.
+probe_vaapi() {
+  if [ ! -e "$VAAPI_DEVICE" ]; then
+    echo "avís: no existeix $VAAPI_DEVICE; sense acceleració de vídeo." >&2
+    return 1
+  fi
+  if ! ffmpeg -hide_banner -loglevel error \
+        -vaapi_device "$VAAPI_DEVICE" \
+        -f lavfi -i "testsrc2=size=320x180:rate=1" -frames:v 1 \
+        -vf "format=nv12,hwupload" -c:v h264_vaapi -f null - >/dev/null 2>&1; then
+    echo "avís: no s'ha pogut inicialitzar h264_vaapi a $VAAPI_DEVICE (drivers VAAPI?)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Triem codificador: 'software' -> libx264; 'vaapi' -> h264_vaapi; 'auto' ->
+# vaapi si la GPU hi és, sinó libx264. Fallback sempre amb avís, per no perdre
+# el directe.
+VENC=""
+case "$(printf '%s' "$ENCODER" | tr '[:upper:]' '[:lower:]')" in
+  software) VENC=software ;;
+  vaapi)
+    if probe_vaapi; then VENC=vaapi;
+    else echo "Avís: caic a libx264." >&2; VENC=software; fi ;;
+  auto|*)
+    if probe_vaapi; then VENC=vaapi; echo "GPU detectada: h264_vaapi ($VAAPI_DEVICE).";
+    else echo "Sense GPU usable: faig servir libx264 (CPU)."; VENC=software; fi ;;
+esac
+
 # Bucle d'emissió: reinicia ffmpeg si cau la connexió.
 while true; do
   echo "Iniciant emissió -> ${RTMP_URL}/${KEY}"
-  ffmpeg -hide_banner -loglevel warning \
-    -f x11grab -video_size "${W}x${H}" -framerate "$FPS" -draw_mouse 0 -i "$DISPLAY" \
-    -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100" \
-    -c:v libx264 -preset veryfast -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF" \
-    -pix_fmt yuv420p -g "$((FPS*2))" -keyint_min "$((FPS*2))" -sc_threshold 0 \
-    -c:a aac -b:a 128k -ar 44100 -ac 2 \
-    -f flv "${RTMP_URL}/${KEY}" &
+  FFARGS=(
+    -hide_banner -loglevel warning
+    -f x11grab -video_size "${W}x${H}" -framerate "$FPS" -draw_mouse 0 -i "$DISPLAY"
+    -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100"
+  )
+  if [ "$VENC" = vaapi ]; then
+    # Codificació a la GPU (AMD/Intel via VAAPI): allibera la CPU que abans
+    # gastava libx264. La conversió a nv12 + hwupload la fa ffmpeg a la CPU
+    # (barata); la compressió H.264 la fa el còdec de maquinari de la iGPU.
+    FFARGS+=(
+      -vaapi_device "$VAAPI_DEVICE"
+      -vf "format=nv12,hwupload"
+      -c:v h264_vaapi -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF"
+      -g "$((FPS*2))" -keyint_min "$((FPS*2))" -sc_threshold 0 -bf 0
+    )
+    echo "  codificador: h264_vaapi ($VAAPI_DEVICE)"
+  else
+    FFARGS+=(
+      -c:v libx264 -preset veryfast -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF"
+      -pix_fmt yuv420p -g "$((FPS*2))" -keyint_min "$((FPS*2))" -sc_threshold 0
+    )
+    echo "  codificador: libx264 (software)"
+  fi
+  FFARGS+=(-c:a aac -b:a 128k -ar 44100 -ac 2 -f flv "${RTMP_URL}/${KEY}")
+  ffmpeg "${FFARGS[@]}" &
   FFPID=$!
   wait $FFPID || echo "ffmpeg ha caigut; reiniciant en 3s..."
   FFPID=

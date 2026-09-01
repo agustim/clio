@@ -41,8 +41,15 @@ CMD ["linkanalyzer", "serve"]
 
 # ---- stream: "tot en un" (a partir de app) ----
 FROM app AS stream
+# Drivers VA-API per a codificar amb GPU:
+#   mesa-va-drivers        -> AMD (radeonsi/VCN)
+#   intel-media-va-driver  -> Intel Gen8+ / Kaby Lake (iHD); el driver que cal
+#                             per a Gen9 i posteriors (H.264, HEVC/VP9 decode).
+# Amb tots dos, libva tria el driver segons el node /dev/dri de la màquina
+# (AMD -> radeonsi, Intel -> iHD). Si es vol forçar: LIBVA_DRIVER_NAME=iHD.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb chromium xdotool ffmpeg curl \
+        libva2 libva-drm2 mesa-va-drivers intel-media-va-driver vainfo \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/stream.sh /usr/local/bin/stream.sh
 RUN chmod +x /usr/local/bin/stream.sh

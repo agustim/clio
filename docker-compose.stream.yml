@@ -42,8 +42,21 @@ services:
       OVERLAY_URL: http://clio:8080/overlay
       TWITCH_RTMP_URL: ${TWITCH_RTMP_URL:-rtmp://live.twitch.tv/app}
       TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:?cal TWITCH_STREAM_KEY a .env}
+      # Per defecte l'script prova VAAPI i cau a libx264 si no hi és; pots
+      # forçar el mode amb ENCODER=vaapi o ENCODER=software.
+      ENCODER: ${ENCODER:-auto}
+      # Força el driver VA-API (només cal en cas de dubte): Intel -> iHD
+      # (per Ex. LIBVA_DRIVER_NAME=iHD al .env); en blanc libva auto-detecta
+      # (AMD -> radeonsi, Intel -> iHD).
+      LIBVA_DRIVER_NAME: ${LIBVA_DRIVER_NAME:-}
       # El Chromium kiosk força sempre 1920x1080, per tant l'escena es captura a
       # 1080p (si la pantalla fos més petita, el contingut es retallaria).
       WIDTH: ${OVERLAY_WIDTH:-1920}
       HEIGHT: ${OVERLAY_HEIGHT:-1080}
       FPS: ${OVERLAY_FPS:-30}
+    devices:
+      # GPU (recomanada): passa el node de render (AMD o Intel) al container
+      # per codificar amb VAAPI (h264_vaapi) i descarregar la CPU. A l'Intel
+      # Kabylake és /dev/dri/renderD128 igualment.
+      # Si la màquina d'emissió no té /dev/dri, comenta aquest bloc.
+      - /dev/dri/renderD128:/dev/dri/renderD128

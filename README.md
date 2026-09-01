@@ -275,6 +275,15 @@ docker compose -f docker-compose.stream.yml pull && docker compose -f docker-com
   `docker compose -f docker-compose.stream.yml up -d --build stream`.
 - Variables: `OVERLAY_URL`, `TWITCH_RTMP_URL` (default `rtmp://live.twitch.tv/app`),
   `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k).
+  **Acceleració de vídeo**: per defecte està actiu (`ENCODER=auto`): si passa el
+  node de render de la iGPU al container (`devices: [/dev/dri/renderD128...]` a
+  `docker-compose.stream.yml`), `ffmpeg` codifica amb **`h264_vaapi` a la GPU** en
+  lloc de `libx264` a la CPU i l'allibera; si no hi ha GPU, cau sol a `libx264`.
+  Pots forçar el mode amb `ENCODER=vaapi` o `ENCODER=software`. La imatge `stream`
+  inclou els drivers VA-API **AMD** (`mesa-va-drivers`) i **Intel Gen8+/Kaby Lake**
+  (`intel-media-va-driver`, el driver iHD); si en un host Intel cal forçar el
+  driver, posa
+  `LIBVA_DRIVER_NAME=iHD` al `.env` (en blanc, libva auto-detecta).
   **Tingues en compte**: el Chromium kiosk força la finestra a 1920×1080. Si la pantalla
   virtual fos més petita, el contingut es retallaria i es veuria encongit — per això
   l'escena es captura a 1080p (1920×1080) per defecte. Si depasses Twitch amb `rtmp://`
