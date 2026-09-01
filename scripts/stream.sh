@@ -23,9 +23,17 @@
 #                    vaapi i cau a libx264 si la GPU no està disponible).
 #                    Per defecte: auto.
 #   VAAPI_DEVICE     Node DRM de render per a VAAPI (default /dev/dri/renderD128);
-#                    cal que estigui muntat dins del container i tenir-hi els
-#                    drivers VAAPI (mesa-va-drivers). Si el node no existeix o
-#                    el driver falla, es fa fallback a libx264.
+#                    cal que estigui muntat dins del container. Si el node no
+#                    existeix o cap driver no funciona, es fa fallback a libx264.
+#   LIBVA_DRIVER_NAME (opcional) Driver VA-API a forçar (p.ex. iHD o radeonsi).
+#                    Si va buit, l'script els prova automàticament en ordre
+#                    (auto, iHD, radeonsi) i fa servir el que funcioni — útil
+#                    perquè en containers sense udev libva no auto-detecta.
+#   VAAPI_QP         Qualitat de codificació amb la GPU (CQP: quantitzador
+#                    constant 0-51; més baix = més nit i més bits). Per defecte
+#                    26. NOTA: a Kaby Lake/Gen9 el driver iHD només accepta
+#                    control de rate CQP (no VBR/CBR), per això en mode vaapi
+#                    no es fan servir VIDEO_BITRATE/BUF.
 set -euo pipefail
 
 OVERLAY_URL="${OVERLAY_URL:-http://127.0.0.1:8080/overlay}"
@@ -36,6 +44,7 @@ VBR="${VIDEO_BITRATE:-5000k}"
 BUF="${BUF:-10000k}"
 ENCODER="${ENCODER:-auto}"
 VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
+VAAPI_QP="${VAAPI_QP:-26}"
 DISPLAY=:99
 CHROME_PROFILE="${CHROME_PROFILE:-/tmp/clio-chrome}"
 
@@ -116,37 +125,71 @@ start_chromium
 apply_window_geometry
 sleep 2
 
-# Prova ràpida (1 frame, sense escriure cap fitxer) que el node de render
-# realment pot codificar H.264 via VAAPI: si no, per a 24/7 és molt millor
-# funcionar amb libx264 que morir al primer frame de l'emissió.
-probe_vaapi() {
-  if [ ! -e "$VAAPI_DEVICE" ]; then
-    echo "avís: no existeix $VAAPI_DEVICE; sense acceleració de vídeo." >&2
-    return 1
+# Prova ràpida (1 frame, sense escriure cap fitxer) de codificar H.264 via
+# VAAPI amb UN driver concret; si cap driver no funciona, per a 24/7 és molt
+# millor emetre amb libx264 que morir al primer frame.
+# Driver "" = "deixa que libva decideixi"; en containers sense udev això sol
+# fallar i cal provar-los un a un (vegeu `choose_encoder`).
+VA_DRIVER=""
+try_driver() {
+  local d="$1"
+  local ok
+  if [ -n "$d" ]; then
+    if ! ok=$(LIBVA_DRIVER_NAME="$d" ffmpeg -hide_banner -loglevel error \
+          -vaapi_device "$VAAPI_DEVICE" \
+          -f lavfi -i "testsrc2=size=320x180:rate=1" -frames:v 1 \
+          -vf "format=nv12,hwupload" -c:v h264_vaapi -f null - 2>&1); then
+      return 1
+    fi
+  else
+    # "" = auto detect; cal treure la variable, no deixar-la buida.
+    if ! ok=$(env -u LIBVA_DRIVER_NAME ffmpeg -hide_banner -loglevel error \
+          -vaapi_device "$VAAPI_DEVICE" \
+          -f lavfi -i "testsrc2=size=320x180:rate=1" -frames:v 1 \
+          -vf "format=nv12,hwupload" -c:v h264_vaapi -f null - 2>&1); then
+      return 1
+    fi
   fi
-  if ! ffmpeg -hide_banner -loglevel error \
-        -vaapi_device "$VAAPI_DEVICE" \
-        -f lavfi -i "testsrc2=size=320x180:rate=1" -frames:v 1 \
-        -vf "format=nv12,hwupload" -c:v h264_vaapi -f null - >/dev/null 2>&1; then
-    echo "avís: no s'ha pogut inicialitzar h264_vaapi a $VAAPI_DEVICE (drivers VAAPI?)" >&2
-    return 1
-  fi
+  [ -z "$ok" ] || return 1
+  VA_DRIVER="$d"
   return 0
 }
 
-# Triem codificador: 'software' -> libx264; 'vaapi' -> h264_vaapi; 'auto' ->
-# vaapi si la GPU hi és, sinó libx264. Fallback sempre amb avís, per no perdre
-# el directe.
+# Triem codificador i driver VA-API: 'software' -> libx264; 'vaapi' ->
+# h264_vaapi; 'auto' -> vaapi si la GPU hi és, sinó libx264. Fallback sempre
+# amb avís, per no perdre el directe. Ordre de drivers provats: el demanat per
+# l'usuari (LIBVA_DRIVER_NAME), auto, Intel iHD, AMD radeonsi.
+choose_encoder() {
+  [ -e "$VAAPI_DEVICE" ] || {
+    echo "avís: no existeix $VAAPI_DEVICE; sense acceleració de vídeo." >&2
+    VENC=software
+    return
+  }
+  local forbida=0
+  case "$(printf '%s' "$ENCODER" | tr '[:upper:]' '[:lower:]')" in
+    software) VENC=software; return ;;
+    vaapi) forbida=1 ;;
+    auto|*) forbida=0 ;;
+  esac
+  if [ -n "${LIBVA_DRIVER_NAME:-}" ]; then
+    try_driver "$LIBVA_DRIVER_NAME" && VENC=vaapi || VENC=software
+  elif try_driver "" || try_driver iHD || try_driver radeonsi; then
+    VENC=vaapi
+  else
+    VENC=software
+  fi
+  if [ "$VENC" = software ]; then
+    if [ "$forbida" = 1 ]; then
+      echo "Avís: cap driver VA-API no ha pogut inicialitzar h264_vaapi a $VAAPI_DEVICE; caic a libx264." >&2
+    else
+      echo "Sense GPU usable: faig servir libx264 (CPU)."
+    fi
+  else
+    echo "GPU detectada: h264_vaapi ($VAAPI_DEVICE, driver ${VA_DRIVER:-auto})."
+  fi
+}
 VENC=""
-case "$(printf '%s' "$ENCODER" | tr '[:upper:]' '[:lower:]')" in
-  software) VENC=software ;;
-  vaapi)
-    if probe_vaapi; then VENC=vaapi;
-    else echo "Avís: caic a libx264." >&2; VENC=software; fi ;;
-  auto|*)
-    if probe_vaapi; then VENC=vaapi; echo "GPU detectada: h264_vaapi ($VAAPI_DEVICE).";
-    else echo "Sense GPU usable: faig servir libx264 (CPU)."; VENC=software; fi ;;
-esac
+choose_encoder
 
 # Bucle d'emissió: reinicia ffmpeg si cau la connexió.
 while true; do
@@ -160,13 +203,23 @@ while true; do
     # Codificació a la GPU (AMD/Intel via VAAPI): allibera la CPU que abans
     # gastava libx264. La conversió a nv12 + hwupload la fa ffmpeg a la CPU
     # (barata); la compressió H.264 la fa el còdec de maquinari de la iGPU.
+    # Control de rate CQP (quantitzador constant): a Gen9/Kaby Lake el driver
+    # iHD només suporta CQP; si es passés bitrate (b:v/maxrate/bufsize),
+    # l'encoder no s'obriria. La qualitat es regula amb VAAPI_QP.
     FFARGS+=(
       -vaapi_device "$VAAPI_DEVICE"
       -vf "format=nv12,hwupload"
-      -c:v h264_vaapi -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF"
-      -g "$((FPS*2))" -keyint_min "$((FPS*2))" -sc_threshold 0 -bf 0
+      -c:v h264_vaapi -rc_mode CQP -qp "$VAAPI_QP" -bf 0
+      -g "$((FPS*2))" -keyint_min "$((FPS*2))"
     )
-    echo "  codificador: h264_vaapi ($VAAPI_DEVICE)"
+    # Fica el driver que vam validar al probe (o treu-lo si era "auto"), per
+    # què l'emissió real faci servir exactament el mateix.
+    if [ -n "$VA_DRIVER" ]; then
+      export LIBVA_DRIVER_NAME="$VA_DRIVER"
+    else
+      unset LIBVA_DRIVER_NAME
+    fi
+    echo "  codificador: h264_vaapi ($VAAPI_DEVICE, driver ${VA_DRIVER:-auto})"
   else
     FFARGS+=(
       -c:v libx264 -preset veryfast -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF"

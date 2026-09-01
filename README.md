@@ -274,16 +274,20 @@ docker compose -f docker-compose.stream.yml pull && docker compose -f docker-com
   buida "This space intentionally blank…"). Després de tocar-lo cal
   `docker compose -f docker-compose.stream.yml up -d --build stream`.
 - Variables: `OVERLAY_URL`, `TWITCH_RTMP_URL` (default `rtmp://live.twitch.tv/app`),
-  `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k).
+  `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k; **només mode
+  software**), `VAAPI_QP` (qualitat GPU, CQP 0-51, per defecte 26).
   **Acceleració de vídeo**: per defecte està actiu (`ENCODER=auto`): si passa el
   node de render de la iGPU al container (`devices: [/dev/dri/renderD128...]` a
   `docker-compose.stream.yml`), `ffmpeg` codifica amb **`h264_vaapi` a la GPU** en
   lloc de `libx264` a la CPU i l'allibera; si no hi ha GPU, cau sol a `libx264`.
   Pots forçar el mode amb `ENCODER=vaapi` o `ENCODER=software`. La imatge `stream`
   inclou els drivers VA-API **AMD** (`mesa-va-drivers`) i **Intel Gen8+/Kaby Lake**
-  (`intel-media-va-driver`, el driver iHD); si en un host Intel cal forçar el
-  driver, posa
-  `LIBVA_DRIVER_NAME=iHD` al `.env` (en blanc, libva auto-detecta).
+  (`intel-media-va-driver`, el driver iHD); si el vols forçar, posa `LIBVA_DRIVER_NAME=iHD`
+  al `.env`. En blanc, `stream.sh` prova automàticament **auto → iHD → radeonsi** i fa
+  servir el primer que funcioni — evita la dependència de l'auto-detecció de libva, que
+  als containers sense udev sol fallar. Nota: a Kaby Lake/Gen9 el driver iHD només
+  accepta **control de rate CQP**, per això en mode vaapi la qualitat es regula amb
+  `VAAPI_QP` (no amb `VIDEO_BITRATE`).
   **Tingues en compte**: el Chromium kiosk força la finestra a 1920×1080. Si la pantalla
   virtual fos més petita, el contingut es retallaria i es veuria encongit — per això
   l'escena es captura a 1080p (1920×1080) per defecte. Si depasses Twitch amb `rtmp://`

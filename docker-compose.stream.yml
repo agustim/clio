@@ -45,9 +45,10 @@ services:
       # Per defecte l'script prova VAAPI i cau a libx264 si no hi és; pots
       # forçar el mode amb ENCODER=vaapi o ENCODER=software.
       ENCODER: ${ENCODER:-auto}
-      # Força el driver VA-API (només cal en cas de dubte): Intel -> iHD
-      # (per Ex. LIBVA_DRIVER_NAME=iHD al .env); en blanc libva auto-detecta
-      # (AMD -> radeonsi, Intel -> iHD).
+      # Driver VA-API (opcional, per forçar): Intel -> "iHD", AMD -> "radeonsi".
+      # En blanc, stream.sh els prova automàticament (auto, iHD, radeonsi) i fa
+      # servir el que funcioni — evita dependre de l'auto-detecció de libva,
+      # que als containers sense udev sol fallar.
       LIBVA_DRIVER_NAME: ${LIBVA_DRIVER_NAME:-}
       # El Chromium kiosk força sempre 1920x1080, per tant l'escena es captura a
       # 1080p (si la pantalla fos més petita, el contingut es retallaria).
