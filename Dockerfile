@@ -47,9 +47,13 @@ FROM app AS stream
 #                             per a Gen9 i posteriors (H.264, HEVC/VP9 decode).
 # Amb tots dos, libva tria el driver segons el node /dev/dri de la màquina
 # (AMD -> radeonsi, Intel -> iHD). Si es vol forçar: LIBVA_DRIVER_NAME=iHD.
+# Fonts: debian-slim no porta cap font d'emojis -> el Chromium de l'overlay els
+# mostraria com a quadrets buits. fonts-noto-color-emoji hi posa remei (i
+# fonts-noto-core garanteix el joc base de símbols/glyphs per als fallbacks).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb chromium xdotool ffmpeg curl \
         libva2 libva-drm2 mesa-va-drivers intel-media-va-driver vainfo \
+        fonts-noto-color-emoji fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/stream.sh /usr/local/bin/stream.sh
 RUN chmod +x /usr/local/bin/stream.sh
