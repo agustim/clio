@@ -60,6 +60,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pulseaudio pulseaudio-utils libpulse0 \
         fonts-noto-color-emoji fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
+# Força "default" d'ALSA cap a PulseAudio de manera INCONDICIONAL. Sense això el
+# Chromium obre el PCM "default" abans que el daemon sigui amunt i l'hook de
+# Debian (pulse_load_if_running, avaluat un sol cop per procés) mai no
+# redirigeix -> "Unknown PCM default" i l'emissió va en silenci. (El libasound2
+# de Debian està compilat amb el plug-in pulse, per això `type pulse` funciona.)
+RUN printf '%s\n' \
+        'pcm.!default { type pulse }' \
+        'ctl.!default { type pulse }' \
+        > /etc/asound.conf
 COPY scripts/stream.sh /usr/local/bin/stream.sh
 RUN chmod +x /usr/local/bin/stream.sh
 # Dispatcher: CLIO_MODE=stream -> emissió; sinó -> linkanalyzer serve (o la

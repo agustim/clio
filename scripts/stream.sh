@@ -116,6 +116,15 @@ start_audio() {
   if command -v pactl >/dev/null 2>&1; then
     pactl set-default-sink clio_out 2>/dev/null || true
     pactl set-sink-volume clio_out 100% 2>/dev/null || true
+    # Lliga els clients (Chromium) al daemon concret que acabem d'aixecar. Sense
+    # això, la discovery de libpulse depèn de XDG_RUNTIME_DIR (~/.config/pulse),
+    # i als containers és fàcil que el client miri un socket que no existeix.
+    local srv
+    srv=$(pactl info 2>/dev/null | awk -F: '/Server String/{gsub(/^ +| +$/,"",$2); print $2}') || true
+    if [ -n "$srv" ]; then
+      export PULSE_SERVER="$srv"
+      echo "PULSE_SERVER=$srv"
+    fi
   fi
   if pactl list short sources 2>/dev/null | grep -q 'clio_out.monitor'; then
     AUDIO_DISABLED=0
@@ -144,9 +153,14 @@ apply_window_geometry() {
     echo "avís: no s'ha trobat la finestra de Chromium per redimensionar"
   fi
 }
+# IMPORTANT: PulseAudio ha de ser amunt ABANS del Chromium. El Chromium obre el
+# PCM "default" en arrencar el servei d'àudio; la redirecció ALSA->Pulse de
+# Debian (`libasound2-plugins`) s'avalua UNA sola vegada per procés, així que si
+# el daemon encara no hi és quan Chromium fa el primer open, es queda amb
+# "Unknown PCM default" i l'emissió va en silenci per sempre (fins a reiniciar).
+start_audio
 start_chromium
 apply_window_geometry
-start_audio
 sleep 2
 
 # Prova ràpida (1 frame, sense escriure cap fitxer) de codificar H.264 via
