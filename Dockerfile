@@ -9,7 +9,7 @@
 #
 #   docker build --target stream -t <reg>/clio-stream:latest .
 #   docker build .                              (mateix; stream és el target per defecte)
-#       -> imatge "TOT EN UN": clio serve + emissió headless a Twitch
+#       -> imatge "TOT EN UN": clio serve + emissió headless a Twitch i/o YouTube
 #          (Xvfb + Chromium + ffmpeg) + tota la CLI. Tria el mode amb:
 #            CLIO_MODE=serve   (per defecte)  CLIO_MODE=stream
 #            o passa un subordre CLI directe: docker run img images --limit 5

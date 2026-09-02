@@ -1,10 +1,13 @@
-# Emissió headless a Twitch (sense OBS) fent servir les imatges PUBLICADES a
-# ghcr.io (el workflow de release les puja: `clio` = lleugera, `clio-stream` =
-# "tot en un" amb Xvfb+Chromium+ffmpeg).
+# Emissió headless a Twitch i/o YouTube (sense OBS) fent servir les imatges
+# PUBLICADES a ghcr.io (el workflow de release les puja: `clio` = lleugera,
+# `clio-stream` = "tot en un" amb Xvfb+Chromium+ffmpeg).
 #
 # Usos:
 #   docker compose -f docker-compose.stream.yml pull          # baixa les imatges
 #   docker compose -f docker-compose.stream.yml up -d         # aixeca el directe
+#
+# Al .env hi ha d'haver, com a mínim, TWITCH_STREAM_KEY o YOUTUBE_STREAM_KEY
+# (pot haver-hi totes dues: s'emet en paral·lel a ambdues plataformes).
 #
 # Si prefereixes construir-les des d'aquest repo (en lloc de baixar-les),
 # descomenta els blocs `build` de sota.
@@ -40,8 +43,15 @@ services:
     environment:
       CLIO_MODE: stream
       OVERLAY_URL: http://clio:8080/overlay
+      # Cada plataforma amb clau configurada s'emet; stream.sh valida a
+      # l'arrencada que hi ha com a mínim UNA clau.
+      STREAM_MODE: ${STREAM_MODE:-tee}       # tee = 1 sola codificació | split = una per plataforma
+      TEE_WARMUP_SECS: ${TEE_WARMUP_SECS:-20}
+      TEE_RETRY_SECS: ${TEE_RETRY_SECS:-300}
       TWITCH_RTMP_URL: ${TWITCH_RTMP_URL:-rtmp://live.twitch.tv/app}
-      TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:?cal TWITCH_STREAM_KEY a .env}
+      TWITCH_STREAM_KEY: ${TWITCH_STREAM_KEY:-}
+      YOUTUBE_RTMP_URL: ${YOUTUBE_RTMP_URL:-rtmp://a.rtmp.youtube.com/live2}
+      YOUTUBE_STREAM_KEY: ${YOUTUBE_STREAM_KEY:-}
       # Per defecte l'script prova VAAPI i cau a libx264 si no hi és; pots
       # forçar el mode amb ENCODER=vaapi o ENCODER=software.
       ENCODER: ${ENCODER:-auto}

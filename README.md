@@ -185,7 +185,7 @@ WEB_DEBOUNCE_SECS=60  # deploy reactiu: agrupa una ràfega de links nous en un s
 
 Recomanat: `WEB_REGEN_SECS=0` + deploy reactiu — la web es regenera i fa push només quan la cua acaba d'analitzar links nous (debounce per agrupar ràfegues).
 
-## Overlay de directe i emissió a Twitch
+## Overlay de directe i emissió a Twitch i/o YouTube
 
 Clio pot generar un **canal de notícies en directe** a partir del mateix contingut que ja
 recull: una escena HTML amb **bloc superior** (logo + rellotge/data en directe i segell
@@ -276,7 +276,8 @@ linkanalyzer say "Bon dia, això és una prova" --out proba.mp3   # prova ràpid
 
 1. `linkanalyzer serve` (o el desplegament).
 2. OBS → Font de navegador → `http://127.0.0.1:8080/overlay` (1280×720).
-3. Afegeix una font de navegador per al directe i *Inicia emissió* a Twitch.
+3. Afegeix una font de navegador per al directe i *Inicia emissió* a Twitch
+   i/o YouTube.
 
 ### Emetre headless 24/7 (sense OBS)
 
@@ -293,14 +294,14 @@ La imatge «tot en un» executa qualsevol de les dues coses (a més de tota la C
 
 ```bash
 docker run clio-stream                 # CLIO_MODE buit  -> serve (com `clio`)
-docker run -e CLIO_MODE=stream ...     #                  -> emissió cap a Twitch
+docker run -e CLIO_MODE=stream ...     #                  -> emissió a Twitch i/o YouTube
 docker run clio-stream images --limit 200   # qualsevol subordre CLI directe
 ```
 
 Per aixecar el directe automatitzat (fent servir les imatges de ghcr.io):
 
 ```bash
-cp .env.example .env    # posa-hi TWITCH_STREAM_KEY=...
+cp .env.example .env    # posa-hi TWITCH_STREAM_KEY i/o YOUTUBE_STREAM_KEY
 docker compose -f docker-compose.stream.yml pull && docker compose -f docker-compose.stream.yml up -d
 ```
 
@@ -308,16 +309,30 @@ docker compose -f docker-compose.stream.yml pull && docker compose -f docker-com
   `ghcr.io/agustim/clio` (servei `clio`) i `ghcr.io/agustim/clio-stream`
   (servei `stream`, `CLIO_MODE=stream`). Els blocs `build` hi queden comentats
   per si vols construir-les des d'aquest repo.
-- `scripts/stream.sh` — captura l'overlay i el puja a Twitch, reiniciant ffmpeg si la
-  connexió cau. Usa un **perfil de Chromium fresc a cada arrencada** (`CHROME_PROFILE`,
+- `scripts/stream.sh` — captura l'overlay i el puja per RTMP a **totes** les
+  plataformes amb clau configurada. Per defecte (`STREAM_MODE=tee`) **codifica el
+  vídeo UNA sola vegada** i el muxer `tee` d'ffmpeg el fa arribar a totes; un
+  watcher reinicia el flux si una plataforma cau (reconnexió) i re-prova amb
+  calma (`TEE_RETRY_SECS`) les que ja eren avall a l'inici. Amb
+  `STREAM_MODE=split` cada plataforma té el **seu propi ffmpeg i la seva pròpia
+  reconnexió** (més aïllament, però codifica el doble en mode software). En
+  tots dos modes un watchdog reinicia el Chromium si mor (verificant per `/proc`
+  que el PID és realment el nostre, no un de reutilitzat).
+  Usa un **perfil de Chromium fresc a cada arrencada** (`CHROME_PROFILE`,
   per defecte `/tmp/clio-chrome`) amb `--no-first-run`, `--no-default-browser-check`
   i `--disable-features=Translate`: garanteix que la finestra kiosk obri només l'overlay,
   sense cap element de Chrome (finestra de navegador per defecte, traducció, pestanya
   buida "This space intentionally blank…"). Després de tocar-lo cal
   `docker compose -f docker-compose.stream.yml up -d --build stream`.
-- Variables: `OVERLAY_URL`, `TWITCH_RTMP_URL` (default `rtmp://live.twitch.tv/app`),
-  `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE` (recomanat 5000k; **només mode
-  software**), `VAAPI_QP` (qualitat GPU, CQP 0-51, per defecte 26).
+- Variables: `STREAM_MODE` (`tee` per defecte = 1 sola codificació; `split` = 1
+  ffmpeg per plataforma), `TEE_WARMUP_SECS` (per defecte 20) i `TEE_RETRY_SECS`
+  (per defecte 300), `OVERLAY_URL`, `TWITCH_RTMP_URL` (default
+  `rtmp://live.twitch.tv/app`), `TWITCH_STREAM_KEY`, `YOUTUBE_RTMP_URL` (default
+  `rtmp://a.rtmp.youtube.com/live2`; versió xifrada: `rtmps://a.rtmp.youtube.com/live2`)
+  i `YOUTUBE_STREAM_KEY` (`YouTube Studio > Crea > Emet en directe`; cal un directe
+  actiu perquè la clau sigui vàlida), i `OVERLAY_WIDTH/HEIGHT/FPS`, `VIDEO_BITRATE`
+  (recomanat 5000k; **només mode software**), `VAAPI_QP` (qualitat GPU, CQP 0-51, per
+  defecte 26).
   **Acceleració de vídeo**: per defecte està actiu (`ENCODER=auto`): si passa el
   node de render de la iGPU al container (`devices: [/dev/dri/renderD128...]` a
   `docker-compose.stream.yml`), `ffmpeg` codifica amb **`h264_vaapi` a la GPU** en

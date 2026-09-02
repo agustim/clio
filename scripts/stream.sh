@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
-# Clio Overlay -> Twitch (sense OBS).
+# Clio Overlay -> Twitch i/o YouTube (sense OBS).
 #
 # Cadenes de 24/7: Xvfb (display virtual) + Chromium (escena /overlay) capturats
-# per ffmpeg (x11grab) i pujats per RTMP a Twitch. Si la connexió cau, ffmpeg es
-# reinicia sol; Chromium també si ha mort.
+# per ffmpeg (x11grab) i pujats per RTMP.
+#
+# STREAM_MODE determina COM s'emet a les plataformes amb clau configurada:
+#   tee   (per defecte) UNA sola codificació: ffmpeg codifica una vegada i el
+#         muxer `tee` fa arribar EL MATEIX flux a totes les plataformes. No es
+#         codifica mai dues vegades (estalvia CPU/GPU). Un watcher vigila el
+#         log de ffmpeg: si una plataforma cau a mig directe, força el reinici
+#         per reconectar-la; si una plataforma ja era avall en arrencar, hi
+#         torna cada TEE_RETRY_SECS sense fer flap (mira TEE_WARMUP_SECS).
+#   split Cadascuna en el SEU procés ffmpeg independent: útil si vols que una
+#         caiguda no afecti mai les altres o si vols bitrates diferents per
+#         plataforma. Consumeix el DOBLE de CPU en mode software (amb GPU/VAAPI
+#         gairebé no es nota).
 #
 # Config (variables d'entorn):
 #   OVERLAY_URL      (default http://127.0.0.1:8080/overlay)
@@ -11,17 +22,40 @@
 #                     Evita pestanyes bufades i finestres de Chrome: "posar com
 #                     a navegador per defecte", traducció, restauració de sessió,
 #                     "This space intentionally blank…", etc.)
-#   TWITCH_STREAM_KEY (obligatòria; https://dashboard.twitch.tv > Configuració > Curs)
-#   TWITCH_RTMP_URL  (default rtmp://live.twitch.tv/app)
+#   STREAM_MODE      tee | split (per defecte tee; vegeu a dalt).
+#   TEE_WARMUP_SECS  Mode tee: segons que passen abans d'actuar sobre un "slave
+#                    failed". Una plataforma que falla DINS aquesta finestra
+#                    s'interpreta com "ja era avall en arrencar": no es reinicia
+#                    de cop (per no fer flap), només es re-prova cada
+#                    TEE_RETRY_SECS. Per defecte 20.
+#   TEE_RETRY_SECS   Mode tee: quan una plataforma s'ha marcat com a avall,
+#                    cada quants segons es reinicia el flux per retrobar-la
+#                    (el directe fa un petit tall en cada intent, només mentre
+#                    hi hagi una plataforma caiguda). Per defecte 300.
+#   TWITCH_STREAM_KEY  (opcional; https://dashboard.twitch.tv > Configuració > Curs)
+#   TWITCH_RTMP_URL    (default rtmp://live.twitch.tv/app)
+#   YOUTUBE_STREAM_KEY (opcional; YouTube Studio > "Crea > Emet en directe" >
+#                       clau d'emissió. Cal crear/iniciar un directe perquè la
+#                       clau sigui vàlida: sense directe actiu l'ingest la
+#                       rebutja o no mostra res al canal.)
+#   YOUTUBE_RTMP_URL   (default rtmp://a.rtmp.youtube.com/live2; pots posar
+#                       rtmps://a.rtmp.youtube.com/live2 per a la versió
+#                       xifrada. YouTube també admet l'ingest B/C.D si `a`
+#                       donés problemes.)
 #   WIDTH/HEIGHT/FPS (default 1920/1080/30. IMPORTANT: el Chromium kiosk força
 #                     sempre la finestra a 1920x1080; si la pantalla (Xvfb) és
 #                     més petita, el contingut es RETALLA. Per tant l'escena es
 #                     dissenya a 1080p i aquí es captura a 1080p.)
-#   VIDEO_BITRATE    (default 5000k; max recomanat per Twitch ~6000k a 1080p)
+#   VIDEO_BITRATE    (default 5000k; max recomanat per Twitch ~6000k a 1080p.
+#                     YouTube admet bitrates superiors, però amb la mateixa
+#                     captura 1080p el 5000k és correcte.)
 #   ENCODER          Codificador de vídeo: 'software' (libx264, CPU), 'vaapi'
 #                    (h264_vaapi, GPU AMD/Intel via VAAPI) o 'auto' (prova
 #                    vaapi i cau a libx264 si la GPU no està disponible).
 #                    Per defecte: auto.
+#                    Nota: amb DÜES plataformes hi ha dos processos ffmpeg
+#                    codificant a la vegada; amb la GPU (VAAPI) no és
+#                    problema, en mode software consumeix el doble de CPU.
 #   VAAPI_DEVICE     Node DRM de render per a VAAPI (default /dev/dri/renderD128);
 #                    cal que estigui muntat dins del container. Si el node no
 #                    existeix o cap driver no funciona, es fa fallback a libx264.
@@ -37,30 +71,74 @@
 set -euo pipefail
 
 OVERLAY_URL="${OVERLAY_URL:-http://127.0.0.1:8080/overlay}"
-RTMP_URL="${TWITCH_RTMP_URL:-rtmp://live.twitch.tv/app}"
-KEY="${TWITCH_STREAM_KEY:-}"
+TWITCH_URL="${TWITCH_RTMP_URL:-rtmp://live.twitch.tv/app}"
+TWITCH_KEY="${TWITCH_STREAM_KEY:-}"
+YOUTUBE_URL="${YOUTUBE_RTMP_URL:-rtmp://a.rtmp.youtube.com/live2}"
+YOUTUBE_KEY="${YOUTUBE_STREAM_KEY:-}"
 W="${WIDTH:-1920}"; H="${HEIGHT:-1080}"; FPS="${FPS:-30}"
 VBR="${VIDEO_BITRATE:-5000k}"
 BUF="${BUF:-10000k}"
 ENCODER="${ENCODER:-auto}"
 VAAPI_DEVICE="${VAAPI_DEVICE:-/dev/dri/renderD128}"
 VAAPI_QP="${VAAPI_QP:-26}"
+STREAM_MODE="$(printf '%s' "${STREAM_MODE:-tee}" | tr '[:upper:]' '[:lower:]')"
+TEE_WARMUP_SECS="${TEE_WARMUP_SECS:-20}"
+TEE_RETRY_SECS="${TEE_RETRY_SECS:-300}"
 DISPLAY=:99
 CHROME_PROFILE="${CHROME_PROFILE:-/tmp/clio-chrome}"
 
-[ -n "$KEY" ] || { echo "error: cal TWITCH_STREAM_KEY" >&2; exit 1; }
+case "$STREAM_MODE" in
+  tee|split) ;;
+  *) echo "error: STREAM_MODE ha de ser tee o split (actual: $STREAM_MODE)" >&2; exit 1 ;;
+esac
+
+# Destinacions d'emissió: cada entrada "Nom|url_completa". Només les que tenen
+# clau configurada. Cal com a mínim una per arrencar l'emissió.
+DEST_C=()
+[ -n "$TWITCH_KEY" ] && DEST_C+=("Twitch|${TWITCH_URL}/${TWITCH_KEY}")
+[ -n "$YOUTUBE_KEY" ] && DEST_C+=("YouTube|${YOUTUBE_URL}/${YOUTUBE_KEY}")
+if [ "${#DEST_C[@]}" -eq 0 ]; then
+  echo "error: cal com a mínim TWITCH_STREAM_KEY o YOUTUBE_STREAM_KEY (o totes dues)" >&2
+  exit 1
+fi
 case "$OVERLAY_URL" in
   http://*|https://*) ;;
   *) echo "error: OVERLAY_URL ha de ser http(s):// (actual: $OVERLAY_URL)" >&2; exit 1 ;;
 esac
 
+# Amaga la clau (últim segment del camí, p.ex. /app/CLAU) a TOTS els missatges
+# de log: la URL completa només es passa a ffmpeg com a argument.
+mask_rtmp() {
+  printf '%s\n' "$1" | sed -E 's#^(.*/)[^/]+$#\1***#'
+}
+# Variant per a una LÍNIA sencera (la spec tee o una línia crua de ffmpeg) amb
+# possiblement MÉS d'una URL: emmascara la clau (últim segment del camí, després
+# de qualsevol nombre de directoris) de totes elles, fins a ' | o espai.
+mask_urls() {
+  printf '%s\n' "$1" | sed -E "s#(rtmps?://[^/ ]+(/[^/ ]+)*/)[^/'| ]+#\1***#g"
+}
+
+# Pids dels subshells (un bucle d'emissió per destí + watchdog) per aturar-los
+# tots a la sortida; cada subshell es mata el seu propi ffmpeg dins del seu trap.
+JOBS_PID=()
+XPID=""
+CLEANED=0
 cleanup() {
-  [ -n "${FFPID:-}" ] && kill "$FFPID" 2>/dev/null || true
-  [ -n "${CPID:-}" ] && kill "$CPID" 2>/dev/null || true
-  [ -n "${XPID:-}" ] && kill "$XPID" 2>/dev/null || true
+  [ "$CLEANED" = 1 ] && return
+  CLEANED=1
+  local p
+  for p in "${JOBS_PID[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+  [ -n "$XPID" ] && kill "$XPID" 2>/dev/null || true
   sleep 1
 }
 trap cleanup EXIT INT TERM
+
+echo "Destinacions d'emissió ($([ "$STREAM_MODE" = tee ] && echo "1 sola codificació via tee" || echo "1 procés ffmpeg per plataforma")):"
+for entry in "${DEST_C[@]}"; do
+  name="${entry%%|*}"
+  echo "  - $name: $(mask_rtmp "${entry#*|}")"
+done
 
 # Espera que el servidor d'overlay respongui (fins 30s).
 for i in $(seq 1 30); do
@@ -197,6 +275,8 @@ try_driver() {
 # h264_vaapi; 'auto' -> vaapi si la GPU hi és, sinó libx264. Fallback sempre
 # amb avís, per no perdre el directe. Ordre de drivers provats: el demanat per
 # l'usuari (LIBVA_DRIVER_NAME), auto, Intel iHD, AMD radeonsi.
+# La tria es fa UNA vegada (abans de llançar els bucles) i és compartida per
+# TOTS els processos ffmpeg de les diferents plataformes.
 choose_encoder() {
   [ -e "$VAAPI_DEVICE" ] || {
     echo "avís: no existeix $VAAPI_DEVICE; sense acceleració de vídeo." >&2
@@ -224,24 +304,32 @@ choose_encoder() {
     fi
   else
     echo "GPU detectada: h264_vaapi ($VAAPI_DEVICE, driver ${VA_DRIVER:-auto})."
+    # Fica el driver que vam validar al probe (o treu-lo si era "auto") perquè
+    # tots els processos ffmpeg facin servir exactament el mateix.
+    if [ -n "$VA_DRIVER" ]; then
+      export LIBVA_DRIVER_NAME="$VA_DRIVER"
+    else
+      unset LIBVA_DRIVER_NAME
+    fi
   fi
 }
 VENC=""
 choose_encoder
 
-# Bucle d'emissió: reinicia ffmpeg si cau la connexió.
-while true; do
-  echo "Iniciant emissió -> ${RTMP_URL}/${KEY}"
-  FFARGS=(
+# Construeix els arguments COMPUNTS de ffmpeg (entrada de vídeo, àudio i
+# codificació) a ARGV. El destí RTMP l'afegeix cada bucle d'emissió.
+ARGV=()
+build_ffmpeg_args() {
+  ARGV=(
     -hide_banner -loglevel warning
     -f x11grab -video_size "${W}x${H}" -framerate "$FPS" -draw_mouse 0 -i "$DISPLAY"
   )
   # Àudio real (monitor de PulseAudio) si hi és; sinó silenci (anullsrc). Amb
   # aquest ordre ffmpeg obre l'àudio abans del vídeo; és indiferent pel flux.
   if [ "$AUDIO_DISABLED" = 0 ]; then
-    FFARGS+=(-f pulse -i clio_out.monitor)
+    ARGV+=(-f pulse -i clio_out.monitor)
   else
-    FFARGS+=(-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100")
+    ARGV+=(-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100")
   fi
   if [ "$VENC" = vaapi ]; then
     # Codificació a la GPU (AMD/Intel via VAAPI): allibera la CPU que abans
@@ -250,35 +338,171 @@ while true; do
     # Control de rate CQP (quantitzador constant): a Gen9/Kaby Lake el driver
     # iHD només suporta CQP; si es passés bitrate (b:v/maxrate/bufsize),
     # l'encoder no s'obriria. La qualitat es regula amb VAAPI_QP.
-    FFARGS+=(
+    ARGV+=(
       -vaapi_device "$VAAPI_DEVICE"
       -vf "format=nv12,hwupload"
       -c:v h264_vaapi -rc_mode CQP -qp "$VAAPI_QP" -bf 0
       -g "$((FPS*2))" -keyint_min "$((FPS*2))"
     )
-    # Fica el driver que vam validar al probe (o treu-lo si era "auto"), per
-    # què l'emissió real faci servir exactament el mateix.
-    if [ -n "$VA_DRIVER" ]; then
-      export LIBVA_DRIVER_NAME="$VA_DRIVER"
-    else
-      unset LIBVA_DRIVER_NAME
-    fi
     echo "  codificador: h264_vaapi ($VAAPI_DEVICE, driver ${VA_DRIVER:-auto})"
   else
-    FFARGS+=(
+    ARGV+=(
       -c:v libx264 -preset veryfast -b:v "$VBR" -maxrate "$VBR" -bufsize "$BUF"
       -pix_fmt yuv420p -g "$((FPS*2))" -keyint_min "$((FPS*2))" -sc_threshold 0
     )
     echo "  codificador: libx264 (software)"
   fi
-  FFARGS+=(-c:a aac -b:a 128k -ar 44100 -ac 2 -f flv "${RTMP_URL}/${KEY}")
-  ffmpeg "${FFARGS[@]}" &
-  FFPID=$!
-  wait $FFPID || echo "ffmpeg ha caigut; reiniciant en 3s..."
-  FFPID=
-  if ! kill -0 "$CPID" 2>/dev/null; then
-    echo "Chromium ha mort; reiniciant."
-    start_chromium
-  fi
-  sleep 3
-done
+  ARGV+=(-c:a aac -b:a 128k -ar 44100 -ac 2)
+}
+
+# Bucle d'emissió PER DESTÍ (mode `split`): reinicia només aquest ffmpeg si cau
+# la connexió. S'executa en un subshell amb el seu propi trap: en rebre TERM/INT
+# marca `stop` (per no tornar a arrencar) i mata el seu ffmpeg; així cada
+# plataforma s'atura sola sense tocar les altres.
+stream_to() {
+  local name="$1" dest="$2"
+  (
+    ffpid=""
+    stop=0
+    trap 'stop=1; [ -n "${ffpid:-}" ] && kill "$ffpid" 2>/dev/null || true' TERM INT
+    while [ "$stop" -eq 0 ]; do
+      echo "[$name] Iniciant emissió -> $(mask_rtmp "$dest")"
+      build_ffmpeg_args
+      ARGV+=(-f flv "$dest")
+      ffmpeg "${ARGV[@]}" &
+      ffpid=$!
+      if ! wait "$ffpid"; then
+        ffpid=""
+        # Si ens estan aturant, no escrius un fals "ha caigut".
+        [ "$stop" -eq 0 ] && echo "[$name] ffmpeg ha caigut; reiniciant en 3s..."
+      else
+        ffpid=""
+      fi
+      [ "$stop" -eq 0 ] && sleep 3
+    done
+  ) &
+  JOBS_PID+=("$!")
+}
+
+# Watcher del mode `tee`: vigila el log de l'únic ffmpeg i decideix quan cal
+# reiniciar-lo per re-conectar una plataforma caiguda, sense re-codificar ni
+# fer flap:
+#   - un "slave failed" PASSAT el warmup (caiguda a mig directe) -> mata ffmpeg
+#     ara mateix (el bucle el rellança en 3 s i es re-conecta);
+#   - un "slave failed" DINS el warmup (la plataforma ja era avall en arrencar)
+#     -> només marca un downflag; el retryer la tornarà a provar cada
+#     TEE_RETRY_SECS reiniciant el flux, sense picar cada pocs segons.
+# Els watchers es destrueixen sols quan ffmpeg mor (tail --pid i /proc).
+start_tee_watchdog() {
+  local log="$1" pid="$2" flag="$3"
+  (
+    local start
+    start=$(date +%s)
+    tail -n +1 -F --pid="$pid" "$log" 2>/dev/null | while IFS= read -r line; do
+      case "$line" in
+        *"Slave muxer #"*"failed"*)
+          if [ $(( $(date +%s) - start )) -gt "$TEE_WARMUP_SECS" ]; then
+            echo "[tee] $(mask_urls "$line")" >&2
+            echo "[tee] plataforma caiguda: reinicio per re-conectar." >&2
+            kill "$pid" 2>/dev/null
+          else
+            touch "$flag"
+            echo "[tee] plataforma avall en arrencar; es re-provarà cada ${TEE_RETRY_SECS}s." >&2
+          fi
+          ;;
+      esac
+    done
+  ) &
+  (
+    local start
+    start=$(date +%s)
+    while [ -e "/proc/$pid" ]; do
+      sleep "$TEE_RETRY_SECS"
+      [ -e "/proc/$pid" ] || break
+      if [ -e "$flag" ] && [ $(( $(date +%s) - start )) -gt "$TEE_WARMUP_SECS" ]; then
+        echo "[tee] re-intent programat per re-enganxar la plataforma avall." >&2
+        kill "$pid" 2>/dev/null
+      fi
+    done
+  ) &
+}
+
+# Bucle d'emissió ÚNICA (mode `tee`): un ffmpeg codifica una vegada i el muxer
+# `tee` entrega EL MATEIX flux a totes les plataformes. El watcher
+# (start_tee_watchdog) s'encarrega de la reconnexió de les que caiguin.
+stream_tee() {
+  (
+    local spec="" i url
+    spec=""
+    for i in "${!DEST_C[@]}"; do
+      url="${DEST_C[$i]#*|}"
+      spec+="[f=flv:onfail=ignore]${url}|"
+    done
+    spec="${spec%|}"
+    local TEE_LOG TEE_FLAG
+    TEE_LOG="${TMPDIR:-/tmp}/clio-tee.log"
+    TEE_FLAG="${TMPDIR:-/tmp}/clio-tee.down"
+    ffpid=""
+    stop=0
+    trap 'stop=1; [ -n "${ffpid:-}" ] && kill "$ffpid" 2>/dev/null || true' TERM INT
+    while [ "$stop" -eq 0 ]; do
+      echo "[tee] Iniciant emissió única (una codificació) -> $(mask_urls "$spec")"
+      build_ffmpeg_args
+      ARGV+=(-f tee "$spec")
+      rm -f "$TEE_FLAG"
+      : > "$TEE_LOG"
+      ffmpeg "${ARGV[@]}" > "$TEE_LOG" 2>&1 &
+      ffpid=$!
+      start_tee_watchdog "$TEE_LOG" "$ffpid" "$TEE_FLAG"
+      if ! wait "$ffpid"; then
+        ffpid=""
+        [ "$stop" -eq 0 ] && echo "[tee] ffmpeg ha caigut; reiniciant en 3s..." >&2
+      else
+        ffpid=""
+      fi
+      [ "$stop" -eq 0 ] && sleep 3
+    done
+  ) &
+  JOBS_PID+=("$!")
+}
+
+# Watchdog del Chromium: si mor, el torna a aixecar (independent dels bucles
+# d'emissió, perquè tots capturen la mateixa finestra i no es poden trepitjar).
+# El mateix patró `stop`: a la sortida es mata l'últim Chromium i s'acaba.
+#
+# Comprovem per /proc que el pid és REALMENT el nostre Chromium (argument
+# --kiosk): un PID sol se reutilitzar quan un procés mor, i `kill -0` podria
+# dir-nos "vivent" per accident i fer-nos creure que el Chromium és amunt.
+is_our_chromium() {
+  [ -n "${CPID:-}" ] || return 1
+  kill -0 "$CPID" 2>/dev/null || return 1
+  tr '\0' ' ' < "/proc/$CPID/cmdline" 2>/dev/null | grep -q -- '--kiosk'
+}
+watchdog_chromium() {
+  (
+    stop=0
+    trap 'stop=1; [ -n "${CPID:-}" ] && kill "$CPID" 2>/dev/null || true' TERM INT
+    while [ "$stop" -eq 0 ]; do
+      sleep 5
+      [ "$stop" -eq 0 ] || continue
+      if ! is_our_chromium; then
+        echo "Chromium ha mort; reiniciant."
+        start_chromium
+        apply_window_geometry
+      fi
+    done
+  ) &
+  JOBS_PID+=("$!")
+}
+
+# Arrenca l'emissió segons el mode: `tee` = un sol ffmpeg / `split` = un per
+# plataforma. En tots dos casos el watchdog del Chromium corre a part.
+case "$STREAM_MODE" in
+  tee)   stream_tee ;;
+  split) for entry in "${DEST_C[@]}"; do stream_to "${entry%%|*}" "${entry#*|}"; done ;;
+esac
+watchdog_chromium
+
+# Espera infinita: els traps fan la neteja (mata subshells -> cada un el seu
+# ffmpeg, més el Xvfb).
+wait
