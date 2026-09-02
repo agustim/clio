@@ -331,6 +331,12 @@ build_ffmpeg_args() {
   else
     ARGV+=(-f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=44100")
   fi
+  # IMPORTANT: el muxer `tee` (mode STREAM_MODE=tee) NO fa auto-mapping: sense
+  # `-map` explícit, ffmpeg mor a l'obertura amb "Output file does not contain
+  # any stream" (no es mapeja cap stream a la sortida). Amb el map explícit
+  # (vídeo = entrada 0, àudio = entrada 1, que és SEMPRE com es construeixen
+  # aquí) funciona tant amb tee com amb el flv directe del mode split.
+  ARGV+=(-map 0:v -map 1:a)
   if [ "$VENC" = vaapi ]; then
     # Codificació a la GPU (AMD/Intel via VAAPI): allibera la CPU que abans
     # gastava libx264. La conversió a nv12 + hwupload la fa ffmpeg a la CPU
