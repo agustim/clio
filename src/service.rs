@@ -176,6 +176,33 @@ impl AppState {
         Ok(())
     }
 
+    /// Drenatge gradual: re-encua fins a `limit` links fallits (els més antics
+    /// primer), repartits entre shallow i deep. El rate limiter i el circuit
+    /// breaker del LLM garanteixen que no es produeixi cap allau al model.
+    /// Retorna quants s'han re-encuat.
+    pub async fn retry_failed_batch(&self, limit: i64) -> Result<usize> {
+        if limit <= 0 {
+            return Ok(0);
+        }
+        // Repartim el llindar entre shallow i deep (la meitat cadascun).
+        let each = (limit / 2).max(1);
+        let shallow = self.db.oldest_failed_shallow_ids(each).await?;
+        let deep = self.db.oldest_failed_deep_ids(each).await?;
+        let mut n = 0usize;
+        for id in &shallow {
+            self.queue.shallow(*id);
+            n += 1;
+        }
+        for id in &deep {
+            self.queue.deep(*id);
+            n += 1;
+        }
+        if n > 0 {
+            tracing::info!(n, shallow = shallow.len(), deep = deep.len(), "reaper: reencuats links fallits (drenatge gradual)");
+        }
+        Ok(n)
+    }
+
     /// Backfill d'embeddings: genera'ls per a tots els links `done` que en
     /// manquin. Retorna (generats, total_pendents). No-op sense LLM.
     pub async fn reindex_embeddings(&self) -> Result<(usize, usize)> {

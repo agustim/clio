@@ -380,6 +380,26 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
     // Recovery: re-encua feina pendent de la DB.
     state.recover().await?;
 
+    // "Reaper": reintenta de forma GRADUAL els links quedats com a 'failed'
+    // (drenatge del backlog). El rate limiter + circuit breaker del LLM fan
+    // que no hi hagi cap allau al model quan es recupera. Cada interval es
+    // re-encua un lot petit de fallits antics.
+    let reaper_state = state.clone();
+    let retry_interval = state.cfg.llm_retry_interval_secs;
+    let retry_batch = state.cfg.llm_retry_batch;
+    if retry_interval > 0 {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(retry_interval));
+            tick.tick().await; // descarta el primer (immediat); recover() ja ho ha fet
+            loop {
+                tick.tick().await;
+                if let Err(e) = reaper_state.retry_failed_batch(retry_batch).await {
+                    tracing::warn!(error = %e, "reaper: passada fallida");
+                }
+            }
+        });
+    }
+
     // Música de fons de l'overlay: si no hi ha cap music.mp3 a PUBLIC_DIR, hi
     // copia el bucle en domini públic d'assets/ (si l'usuari n'ha deixat una,
     // no el toca).

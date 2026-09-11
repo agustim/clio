@@ -145,6 +145,15 @@ async fn handle(state: &AppState, job: Job) {
                     state.web_dirty.notify_one();
                 }
                 Err(e) => {
+                    // Fallada del *proveïdor LLM* (outage/cooldown): no és del link.
+                    // No es compta com a fallada de la URL (no auto-blocklist) ni es
+                    // molesta l'admin: el link ja ha quedat en 'failed' i el circuit
+                    // breaker el reintentarà de forma controlada. Loguegem amb nivell
+                    // baix per no inundar el registre.
+                    if let crate::error::AppError::Llm(_) = &e {
+                        tracing::debug!(link_id = %job.link_id, error = %e, "llm outage (shallow)");
+                        return;
+                    }
                     tracing::error!(link_id = %job.link_id, error = %e, "shallow job failed");
                     notify_failure(state, job.link_id, "Anàlisi", &e.to_string()).await;
                 }
@@ -154,6 +163,10 @@ async fn handle(state: &AppState, job: Job) {
             match deep::process_deep(&state.db, &state.cfg, &state.http, llm, job.link_id).await {
                 Ok(()) => state.web_dirty.notify_one(),
                 Err(e) => {
+                    if let crate::error::AppError::Llm(_) = &e {
+                        tracing::debug!(link_id = %job.link_id, error = %e, "llm outage (deep)");
+                        return;
+                    }
                     tracing::error!(link_id = %job.link_id, error = %e, "deep job failed");
                     notify_failure(state, job.link_id, "Anàlisi profunda", &e.to_string()).await;
                 }

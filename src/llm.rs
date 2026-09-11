@@ -2,19 +2,62 @@ use crate::config::LlmConfig;
 use crate::error::{AppError, Result};
 use crate::models::{Analysis, Sentiment};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Reintents de la crida HTTP al model davant errors transitoris (timeout,
 /// connexions tallades, 5xx...). Amb una fallada persistent no ens quedem amb
 /// un fallback heurístic en l'idioma de la pàgina: l'error es propaga i el
 /// link queda en 'failed' perquè es pugui reintentar amb «Refer».
 const LLM_RETRIES: usize = 2;
-const LLM_RETRY_DELAY_MS: u64 = 500;
+/// Backoff exponencial base per als reintents (500ms · 2^n). Juntament amb el
+/// circuit breaker i el rate limiter evita martellejar un endpoint caigut.
+const LLM_RETRY_BASE_MS: u64 = 500;
 
 /// Client OpenAI-compatible (vLLM / OpenAI / Ollama-openai).
+///
+/// Resilient davant un proveïdor degradat:
+/// - **Circuit breaker** compartit entre tots els workers (`Arc<LlmClient>`):
+///   si hi ha `circuit_threshold` fallades consecutives, s'obre el circuit i es
+///   fan *fail-fast* (sense enviar HTTP) durant un cooldown, amb una única sonda
+///   (half-open) en acabar-lo. Així un endpoint caigut no es martelleja i té
+///   temps de recuperar-se sense que el drenatge del backlog el saturi.
+/// - **Rate limiter** (token bucket comú): capa el nombre de crides per segon
+///   perquè un backlog acumulat mai alluvi el model de cop.
 pub struct LlmClient {
     http: reqwest::Client,
     cfg: LlmConfig,
+    circuit: Mutex<Circuit>,
+    rate: Mutex<RateBucket>,
+}
+
+/// Estad del circuit breaker.
+struct Circuit {
+    /// Fallades consecutives (es buiden amb la primera resposta vàlida).
+    consecutive_fails: usize,
+    /// Estat actual.
+    state: CircuitState,
+    /// Faillades consecutives que obren el circuit (0 desactiva el cooldown).
+    threshold: usize,
+    /// Durada del cooldown un cop obert.
+    cooldown: Duration,
+}
+
+enum CircuitState {
+    /// Normal: s'envien peticions.
+    Closed,
+    /// Refusa totes les crides fins `open_until`.
+    Open { open_until: Instant },
+    /// S'ha concedit UNA sonda; les altres crides es rebutgen fins que passi.
+    HalfOpen,
+}
+
+/// Token bucket per capar les crides per segon (0.0 = sense límit).
+struct RateBucket {
+    rate: f64,
+    burst: f64,
+    tokens: f64,
+    last: Instant,
 }
 
 #[derive(Serialize)]
@@ -57,7 +100,24 @@ struct LlmAnalysis {
 
 impl LlmClient {
     pub fn new(http: reqwest::Client, cfg: LlmConfig) -> Self {
-        Self { http, cfg }
+        let circuit = Circuit {
+            consecutive_fails: 0,
+            state: CircuitState::Closed,
+            threshold: cfg.circuit_threshold,
+            cooldown: Duration::from_secs(cfg.circuit_cooldown_secs),
+        };
+        let rate = RateBucket {
+            rate: cfg.rate_per_sec.max(0.0),
+            burst: cfg.rate_per_sec.max(0.0).max(1.0),
+            tokens: cfg.rate_per_sec.max(0.0).max(1.0),
+            last: Instant::now(),
+        };
+        Self {
+            http,
+            cfg,
+            circuit: Mutex::new(circuit),
+            rate: Mutex::new(rate),
+        }
     }
 
     /// Completació lliure: retorna el text de la resposta del model.
@@ -72,27 +132,43 @@ impl LlmClient {
             .into_iter()
             .next()
             .map(|c| c.message.content)
-            .ok_or_else(|| AppError::Pipeline("llm: empty choices".into()))
+            .ok_or_else(|| AppError::Llm("llm: empty choices".into()))
     }
 
-    /// Crida HTTP al model amb reintent davant errors transitoris. Si al final
-    /// el model no respon, es retorna l'últim error: el pipeline el tracta com
-    /// a fallada (link 'failed' reintentable) en lloc de publicar un fallback
-    /// heurístic que copiaria el text original en la llengua de la pàgina.
+    /// Crida HTTP al model amb reintent davant errors transitoris, limitada pel
+    /// circuit breaker (fail-fast durant el cooldown) i pel rate limiter.
+    ///
+    /// Qualsevol fallada (timeout, connexió tallada, 5xx, cos no desxifrable...)
+    /// es propaga com a `AppError::Llm`: el pipeline la distingeix de les
+    /// fallades de *link* i no compta la URL com a dolenta ni enganxa l'admin.
+    /// Les fallades transitoris es reintenten amb backoff exponencial; si al
+    /// final tampoc respon, s'obre/continua obert el circuit.
     async fn chat(&self, req: &ChatReq<'_>) -> Result<ChatResp> {
+        // 1) Rate limit compartit (no alluvi el model amb un backlog acumular).
+        self.acquire_rate().await;
+
+        // 2) Circuit breaker: fail-fast mentre està dins del cooldown.
+        match self.circuit_gate()? {
+            Gate::Proceed => {}
+            Gate::Cooldown => {
+                return Err(AppError::Llm("llm: servei en cooldown, es retarda el reintent".into()));
+            }
+        }
+
+        // 3) Crides HTTP amb reintents i backoff exponencial.
         let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
-        let mut last: Option<AppError> = None;
+        let mut last: Option<reqwest::Error> = None;
+        let mut success = false;
+        let mut body = None;
         for attempt in 0..=LLM_RETRIES {
             let mut rb = self
                 .http
                 .post(&url)
-                .timeout(std::time::Duration::from_secs(self.cfg.timeout_secs))
-                .json(&req);
+                .timeout(Duration::from_secs(self.cfg.timeout_secs))
+                .json(req);
             if let Some(key) = &self.cfg.api_key {
                 rb = rb.bearer_auth(key);
             }
-            // Bloc async per encadenar send -> error_for_status -> json sense
-            // fer await dins d'un closure no async.
             let attempt_res = async {
                 let resp = rb.send().await?;
                 let resp = resp.error_for_status()?;
@@ -100,18 +176,120 @@ impl LlmClient {
             }
             .await;
             match attempt_res {
-                Ok(body) => return Ok(body),
+                Ok(b) => {
+                    success = true;
+                    body = Some(b);
+                    break;
+                }
                 Err(e) => {
-                    tracing::warn!(attempt, error = %e, "llm: crida fallida, es reintenta");
-                    last = Some(e.into());
-                    tokio::time::sleep(Duration::from_millis(
-                        LLM_RETRY_DELAY_MS * (attempt as u64 + 1),
-                    ))
-                    .await;
+                    tracing::debug!(attempt, error = %e, "llm: crida fallida, es reintenta");
+                    last = Some(e);
+                    let delay = LLM_RETRY_BASE_MS * (1u64 << attempt);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
-        Err(last.unwrap_or_else(|| AppError::Pipeline("llm: sense resposta".into())))
+
+        if success {
+            self.circuit_success();
+            Ok(body.expect("succés amb body"))
+        } else {
+            let err = match last {
+                Some(e) => AppError::Llm(format!("crida HTTP fallida: {e}")),
+                None => AppError::Llm("sense resposta".into()),
+            };
+            self.circuit_failure();
+            Err(err)
+        }
+    }
+
+    /// Fa esperar fins que hi hagi un token disponible (si `rate > 0`).
+    async fn acquire_rate(&self) {
+        let deficit = {
+            let mut b = self.rate.lock().unwrap();
+            if b.rate <= 0.0 {
+                None
+            } else {
+                let now = Instant::now();
+                let dt = (now - b.last).as_secs_f64();
+                b.last = now;
+                b.tokens = (b.tokens + dt * b.rate).min(b.burst);
+                b.tokens -= 1.0;
+                if b.tokens < 0.0 {
+                    Some(Duration::from_secs_f64((-b.tokens) / b.rate))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(d) = deficit {
+            tokio::time::sleep(d).await;
+        }
+    }
+
+    /// Retorna com tractem la crida segons l'estat del circuit.
+    fn circuit_gate(&self) -> Result<Gate> {
+        let mut c = self.circuit.lock().unwrap();
+        if c.threshold == 0 || c.cooldown.is_zero() {
+            return Ok(Gate::Proceed);
+        }
+        let now = Instant::now();
+        match c.state {
+            CircuitState::Closed => Ok(Gate::Proceed),
+            CircuitState::Open { open_until } => {
+                if now >= open_until {
+                    // Cooldown vençut: concedim UNA sonda (half-open).
+                    tracing::info!("llm: circuit mig-obert, sonda de prova");
+                    c.state = CircuitState::HalfOpen;
+                    Ok(Gate::Proceed)
+                } else {
+                    Ok(Gate::Cooldown)
+                }
+            }
+            CircuitState::HalfOpen => Ok(Gate::Cooldown),
+        }
+    }
+
+    /// Se crida quan una resposta del model és vàlida: tanca el circuit.
+    fn circuit_success(&self) {
+        let mut c = self.circuit.lock().unwrap();
+        if c.consecutive_fails > 0 {
+            tracing::info!(fails = c.consecutive_fails, "llm: circuit tancat (resposta vàlida)");
+        }
+        c.consecutive_fails = 0;
+        c.state = CircuitState::Closed;
+    }
+
+    /// Se crida quan el model falla: acumula fallades i obre el circuit en
+    /// arribar al llindar (amb cooldown i backoff).
+    fn circuit_failure(&self) {
+        let mut c = self.circuit.lock().unwrap();
+        c.consecutive_fails += 1;
+        let now = Instant::now();
+        match c.state {
+            CircuitState::HalfOpen | CircuitState::Closed
+                if c.threshold > 0
+                    && !c.cooldown.is_zero()
+                    && c.consecutive_fails >= c.threshold =>
+            {
+                tracing::warn!(
+                    fails = c.consecutive_fails,
+                    cooldown_secs = c.cooldown.as_secs(),
+                    "llm: circuit OBERT (massa fallades seguides), pausa abans de tornar-ho a provar"
+                );
+                c.state = CircuitState::Open {
+                    open_until: now + c.cooldown,
+                };
+            }
+            // Una resposta HalfOpen fallida sempre torna a obrir (el model encara no respon).
+            CircuitState::HalfOpen => {
+                tracing::warn!(cooldown_secs = c.cooldown.as_secs(), "llm: sonda fallida, circuit reobert");
+                c.state = CircuitState::Open {
+                    open_until: now + c.cooldown,
+                };
+            }
+            _ => {}
+        }
     }
 
     pub async fn analyze(&self, title: &str, text: &str, max_chars: usize) -> Result<Analysis> {
@@ -140,12 +318,12 @@ impl LlmClient {
             .into_iter()
             .next()
             .map(|c| c.message.content)
-            .ok_or_else(|| AppError::Pipeline("llm: empty choices".into()))?;
+            .ok_or_else(|| AppError::Llm("llm: empty choices".into()))?;
 
         let json_str = extract_json(&content)
-            .ok_or_else(|| AppError::Pipeline("llm: no JSON in response".into()))?;
+            .ok_or_else(|| AppError::Llm("llm: no JSON in response".into()))?;
         let parsed: LlmAnalysis = serde_json::from_str(json_str)
-            .map_err(|e| AppError::Pipeline(format!("llm: bad JSON: {e}")))?;
+            .map_err(|e| AppError::Llm(format!("llm: bad JSON: {e}")))?;
 
         let sentiment = match parsed.sentiment.to_lowercase().as_str() {
             "positive" => Sentiment::Positive,
@@ -154,7 +332,11 @@ impl LlmClient {
         };
         let title = {
             let t = parsed.title.trim();
-            if t.is_empty() { None } else { Some(t.to_string()) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
         };
         let summary = parsed.summary.trim().to_string();
         // Salvaguarda de llengua: si la resposta és buida (ni títol ni resum),
@@ -162,7 +344,7 @@ impl LlmClient {
         // que copiï l'idioma original de la pàgina: l'error es propaga i el
         // link queda en 'failed', llest per reenquar-se amb «Refer».
         if title.is_none() && summary.is_empty() {
-            return Err(AppError::Pipeline("llm: resposta buida (sense títol ni resum)".into()));
+            return Err(AppError::Llm("llm: resposta buida (sense títol ni resum)".into()));
         }
         Ok(Analysis {
             title,
@@ -171,6 +353,12 @@ impl LlmClient {
             sentiment,
         })
     }
+}
+
+#[derive(PartialEq)]
+enum Gate {
+    Proceed,
+    Cooldown,
 }
 
 /// Treu el primer bloc {...} d'una resposta (per si el model afegeix text al voltant).

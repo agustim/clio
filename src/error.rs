@@ -38,6 +38,13 @@ pub enum AppError {
     #[error("pipeline error: {0}")]
     Pipeline(String),
 
+    /// Fallades del proveïdor LLM (timeout, cos no desxifrable, resposta buida,
+    /// circuit obert / cooldown...). Es distingeixen de les fallades de *link*
+    /// perquè NO han de comptar com a fallada de la URL (no auto-blocklist) ni
+    /// enganxar l'admin per cada link: són problemes transitoris del model.
+    #[error("llm error: {0}")]
+    Llm(String),
+
     #[error("git error: {0}")]
     Git(String),
 }

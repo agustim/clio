@@ -8,6 +8,14 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     /// Timeout per crida al LLM (segons). Generació pot trigar molt en models grans.
     pub timeout_secs: u64,
+    /// Circuit breaker: nombre de fallades consecutives abans d'obrir el circuit
+    /// (i fer fail-fast durant un cooldown). 0/1 = desactivat/pràcticament immediat.
+    pub circuit_threshold: usize,
+    /// Durada (segons) del cooldown un cop el circuit està obert. 0 = desactivat.
+    pub circuit_cooldown_secs: u64,
+    /// Límit de crides al LLM per segon (compartit entre tots els workers).
+    /// 0 = sense límit. Evita que un backlog acumulat alluvi el model en reconnectar-se.
+    pub rate_per_sec: f64,
 }
 
 impl LlmConfig {
@@ -127,6 +135,12 @@ pub struct Config {
     pub flaresolverr_timeout_secs: u64,
     /// Nombre de workers concurrents de la cua d'anàlisi.
     pub queue_workers: usize,
+    /// Interval (segons) entre passades del "reaper" que reintenta de forma
+    /// gradual els links quedats com a 'failed' (drenatge del backlog sense
+    /// allau). 0 = desactivat (només reintent manual/restart).
+    pub llm_retry_interval_secs: u64,
+    /// Màxim de links fallits que es re-encuen a cada passada del reaper.
+    pub llm_retry_batch: i64,
     /// Interval (segons) de regeneració de la web durant `serve`. 0 = desactivat.
     pub web_regen_secs: u64,
     /// Finestra (segons) per agrupar una ràfega de links nous en un sol
@@ -188,6 +202,12 @@ impl Config {
         let queue_workers: usize = get("QUEUE_WORKERS", "4")
             .parse()
             .map_err(|_| AppError::Config("QUEUE_WORKERS invalid".into()))?;
+        let llm_retry_interval_secs: u64 = get("LLM_RETRY_INTERVAL_SECS", "60")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_RETRY_INTERVAL_SECS invalid".into()))?;
+        let llm_retry_batch: i64 = get("LLM_RETRY_BATCH", "25")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_RETRY_BATCH invalid".into()))?;
         let web_regen_secs: u64 = get("WEB_REGEN_SECS", "30")
             .parse()
             .map_err(|_| AppError::Config("WEB_REGEN_SECS invalid".into()))?;
@@ -261,6 +281,15 @@ impl Config {
         let llm_timeout_secs: u64 = get("LLM_TIMEOUT_SECS", "120")
             .parse()
             .map_err(|_| AppError::Config("LLM_TIMEOUT_SECS invalid".into()))?;
+        let llm_circuit_threshold: usize = get("LLM_CIRCUIT_THRESHOLD", "8")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_CIRCUIT_THRESHOLD invalid".into()))?;
+        let llm_circuit_cooldown_secs: u64 = get("LLM_CIRCUIT_COOLDOWN_SECS", "30")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_CIRCUIT_COOLDOWN_SECS invalid".into()))?;
+        let llm_rate_per_sec: f64 = get("LLM_RATE_PER_SEC", "4")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_RATE_PER_SEC invalid".into()))?;
 
         // Embeddings: provider propi. Si no s'especifica base_url/api_key,
         // es reusen els del LLM de chat (ergonòmic per a setups d'un sol proveïdor).
@@ -281,6 +310,9 @@ impl Config {
                 base_url: llm_base,
                 api_key: llm_key,
                 timeout_secs: llm_timeout_secs,
+                circuit_threshold: llm_circuit_threshold,
+                circuit_cooldown_secs: llm_circuit_cooldown_secs,
+                rate_per_sec: llm_rate_per_sec,
             },
             embed,
             git: GitConfig {
@@ -315,6 +347,8 @@ impl Config {
             flaresolverr_url: opt("FLARESOLVERR_URL"),
             flaresolverr_timeout_secs,
             queue_workers,
+            llm_retry_interval_secs,
+            llm_retry_batch,
             web_regen_secs,
             web_debounce_secs,
             clone_timeout_secs,

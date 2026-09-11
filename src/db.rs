@@ -731,6 +731,36 @@ impl Db {
         Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
     }
 
+    /// Links fallits (shallow) més antics — candidats del "reaper" per a un
+    /// reintent gradual (els vells abans que els recents).
+    pub async fn oldest_failed_shallow_ids(&self, limit: i64) -> Result<Vec<Uuid>> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status = 'failed' ORDER BY updated_at ASC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
+    /// Links amb deep fallit més antics — candidats del "reaper" per deep.
+    pub async fn oldest_failed_deep_ids(&self, limit: i64) -> Result<Vec<Uuid>> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status = 'done' AND deep_status = 'failed' \
+             ORDER BY updated_at ASC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
     // ---- Reports ----
 
     /// Insereix report (ignora si duplicat per UNIQUE(link_id,user_id)).
