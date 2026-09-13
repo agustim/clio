@@ -377,6 +377,36 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
     let q_state = state.clone();
     tokio::spawn(async move { crate::queue::run(q_state, rx, workers).await });
 
+    // Comprovació de salut del LLM a l'arrencada: confirma que el model respon i
+    // amb quina forma (content vs reasoning_content) per treballar-hi correctament.
+    if let Some(llm) = &state.llm {
+        let llm = llm.clone();
+        let health = llm.health_check().await;
+        let model = &state.cfg.llm.model;
+        let provider = &state.cfg.llm.base_url;
+        use crate::llm::ModelMode;
+        match (health.reachable, health.mode) {
+            (false, _) => tracing::warn!(
+                %model, %provider,
+                error = health.error.as_deref().unwrap_or("desconegut"),
+                "llm: comprovació d'arrencada FALLIDA (el model no respon)"
+            ),
+            (true, ModelMode::Content) => tracing::info!(
+                %model, %provider,
+                "llm: model OK, mode 'content' (sortida normal)"
+            ),
+            (true, ModelMode::Reasoning) => tracing::info!(
+                %model, %provider,
+                "llm: model OK, mode 'reasoning_content' (model de raonament, content null)"
+            ),
+            (true, ModelMode::Unknown) => tracing::warn!(
+                %model, %provider,
+                error = health.error.as_deref().unwrap_or("resposta buida"),
+                "llm: el model respon però amb forma desconeguda"
+            ),
+        }
+    }
+
     // Recovery: re-encua feina pendent de la DB.
     state.recover().await?;
 

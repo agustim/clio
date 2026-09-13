@@ -157,6 +157,84 @@ impl LlmClient {
             .ok_or_else(|| AppError::Llm("llm: empty choices".into()))
     }
 
+    /// Comprovació ràpida a l'arrencada: confirma que el model respon i amb
+    /// quina forma (`content` vs `reasoning_content`) per saber com treballar-hi.
+    /// És diagnòstic: NO toca el circuit breaker ni el rate limiter.
+    pub async fn health_check(&self) -> ModelHealth {
+        let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
+        let req = ChatReq {
+            model: &self.cfg.model,
+            messages: vec![Msg { role: "user", content: "Respon només amb la paraula: ok" }],
+            temperature: 0.0,
+        };
+        let mut rb = self
+            .http
+            .post(&url)
+            .timeout(Duration::from_secs(15))
+            .json(&req);
+        if let Some(key) = &self.cfg.api_key {
+            rb = rb.bearer_auth(key);
+        }
+        let resp = match rb.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return ModelHealth {
+                    reachable: false,
+                    mode: ModelMode::Unknown,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+        let body: ChatResp = match resp.json::<ChatResp>().await {
+            Ok(b) => b,
+            Err(e) => {
+                return ModelHealth {
+                    reachable: true,
+                    mode: ModelMode::Unknown,
+                    error: Some(format!("cos no desxifrable: {e}")),
+                }
+            }
+        };
+        let msg = match body.choices.into_iter().next() {
+            Some(c) => c.message,
+            None => {
+                return ModelHealth {
+                    reachable: true,
+                    mode: ModelMode::Unknown,
+                    error: Some("sense choices".into()),
+                }
+            }
+        };
+        let has_content = msg
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let has_reasoning = msg
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let mode = if has_content {
+            ModelMode::Content
+        } else if has_reasoning {
+            ModelMode::Reasoning
+        } else {
+            ModelMode::Unknown
+        };
+        ModelHealth {
+            reachable: true,
+            mode,
+            error: if mode == ModelMode::Unknown {
+                Some("resposta buida".into())
+            } else {
+                None
+            },
+        }
+    }
+
     /// Crida HTTP al model amb reintent davant errors transitoris, limitada pel
     /// circuit breaker (fail-fast durant el cooldown) i pel rate limiter.
     ///
@@ -387,6 +465,25 @@ impl LlmClient {
 enum Gate {
     Proceed,
     Cooldown,
+}
+
+/// Com respon el proveïdor LLM: com saber "llegir" la seva sortida.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelMode {
+    /// Resposta normal dins `content`.
+    Content,
+    /// Model de raonament: resposta a `reasoning_content` (i `content` buit/null).
+    Reasoning,
+    /// No s'ha pogut determinar (resposta buida o desconeguda).
+    Unknown,
+}
+
+/// Resultat de la comprovació de salut del model a l'arrencada.
+#[derive(Debug)]
+pub struct ModelHealth {
+    pub reachable: bool,
+    pub mode: ModelMode,
+    pub error: Option<String>,
 }
 
 /// Treu el primer bloc {...} d'una resposta (per si el model afegeix text al voltant).
