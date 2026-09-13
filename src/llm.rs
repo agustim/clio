@@ -83,7 +83,29 @@ struct Choice {
 }
 #[derive(Deserialize)]
 struct RespMsg {
-    content: String,
+    /// Resposta final. En models de raonament (DeepSeek-R1 & co.) sovint és
+    /// `null` i el text real viu a `reasoning_content`; cal suportar-ho.
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+impl RespMsg {
+    /// El text de la resposta: preferim `content`; si és buit/null (models de
+    /// raonament), fem fallback a `reasoning_content`.
+    fn text(&self) -> Option<&str> {
+        self.content
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.reasoning_content
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+    }
 }
 
 /// Forma JSON que demanem al model.
@@ -131,7 +153,7 @@ impl LlmClient {
         body.choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .and_then(|c| c.message.text().map(str::to_owned))
             .ok_or_else(|| AppError::Llm("llm: empty choices".into()))
     }
 
@@ -323,7 +345,7 @@ impl LlmClient {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .and_then(|c| c.message.text().map(str::to_owned))
             .ok_or_else(|| AppError::Llm("llm: empty choices".into()))?;
 
         let json_str = extract_json(&content)
@@ -375,5 +397,37 @@ fn extract_json(s: &str) -> Option<&str> {
         Some(&s[start..=end])
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Models de raonament (DeepSeek-R1 & co.) retornen la resposta a
+    // `reasoning_content` i `content: null`. Clio ha de desxifrar-ho, no caure
+    // com a "error decoding response body" (que era el símptoma real a producció).
+    #[test]
+    fn resp_msg_prefers_content_falls_back_to_reasoning() {
+        // content present => el fem servir.
+        let m: RespMsg =
+            serde_json::from_str(r#"{"role":"assistant","content":"Resposta normal"}"#).unwrap();
+        assert_eq!(m.text(), Some("Resposta normal"));
+
+        // content: null => raonament.
+        let m: RespMsg = serde_json::from_str(
+            r#"{"role":"assistant","reasoning_content":"Resposta del model","content":null}"#,
+        )
+        .unwrap();
+        assert_eq!(m.text(), Some("Resposta del model"));
+
+        // només reasoning_content (sense content) => raonament.
+        let m: RespMsg =
+            serde_json::from_str(r#"{"role":"assistant","reasoning_content":"Raonat"}"#).unwrap();
+        assert_eq!(m.text(), Some("Raonat"));
+
+        // content buit i reasoning buit => None.
+        let m: RespMsg = serde_json::from_str(r#"{"role":"assistant"}"#).unwrap();
+        assert_eq!(m.text(), None);
     }
 }
