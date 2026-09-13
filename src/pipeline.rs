@@ -556,7 +556,14 @@ pub async fn process_link(
             Ok(())
         }
         Err(e) => {
-            tracing::warn!(%link_id, url = %link.url, error = %e, "processing failed");
+            // Fallades del proveïdor LLM (outage/cooldown): apart del fet que no
+            // són culpa del link, no cal embrutar el registre amb un WARN per cada
+            // link mentre el model està caigut; el circuit breaker ja ho informa.
+            if let crate::error::AppError::Llm(_) = &e {
+                tracing::debug!(%link_id, url = %link.url, error = %e, "processing failed (affecta al LLM)");
+            } else {
+                tracing::warn!(%link_id, url = %link.url, error = %e, "processing failed");
+            }
             db.set_link_status(link_id, crate::models::LinkStatus::Failed).await?;
             Err(e)
         }

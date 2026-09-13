@@ -37,7 +37,11 @@ pub async fn process_deep(
             Ok(())
         }
         Err(e) => {
-            tracing::warn!(%link_id, error = %e, "deep pass failed");
+            if let crate::error::AppError::Llm(_) = &e {
+                tracing::debug!(%link_id, error = %e, "deep pass failed (afecta al LLM)");
+            } else {
+                tracing::warn!(%link_id, error = %e, "deep pass failed");
+            }
             db.set_deep_status(link_id, crate::models::DeepStatus::Failed).await?;
             Err(e)
         }

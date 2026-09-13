@@ -393,6 +393,18 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
             tick.tick().await; // descarta el primer (immediat); recover() ja ho ha fet
             loop {
                 tick.tick().await;
+                // Mentre el model està en cooldown (circuit obert) no té sentit
+                // ressuscitar links fallits: farien fail-fast. Esperem que es
+                // recuperi (una sonda de trànsit real el tancarà) per continuar
+                // el drenatge.
+                let cooling = reaper_state
+                    .llm
+                    .as_deref()
+                    .map(|l| l.is_cooling_down())
+                    .unwrap_or(false);
+                if cooling {
+                    continue;
+                }
                 if let Err(e) = reaper_state.retry_failed_batch(retry_batch).await {
                     tracing::warn!(error = %e, "reaper: passada fallida");
                 }

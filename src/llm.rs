@@ -260,35 +260,41 @@ impl LlmClient {
         c.state = CircuitState::Closed;
     }
 
+    /// Cert si ara mateix el circuit rebutjaria crides (cooldown actiu o sonda
+    /// en vol). Ho fa servir el "reaper" per no re-encuar links inútilment
+    /// mentre el model està caigut.
+    pub fn is_cooling_down(&self) -> bool {
+        let c = self.circuit.lock().unwrap();
+        match c.state {
+            CircuitState::Open { open_until } => Instant::now() < open_until,
+            CircuitState::HalfOpen => true,
+            CircuitState::Closed => false,
+        }
+    }
+
     /// Se crida quan el model falla: acumula fallades i obre el circuit en
     /// arribar al llindar (amb cooldown i backoff).
     fn circuit_failure(&self) {
         let mut c = self.circuit.lock().unwrap();
         c.consecutive_fails += 1;
         let now = Instant::now();
-        match c.state {
-            CircuitState::HalfOpen | CircuitState::Closed
-                if c.threshold > 0
-                    && !c.cooldown.is_zero()
-                    && c.consecutive_fails >= c.threshold =>
-            {
-                tracing::warn!(
-                    fails = c.consecutive_fails,
-                    cooldown_secs = c.cooldown.as_secs(),
-                    "llm: circuit OBERT (massa fallades seguides), pausa abans de tornar-ho a provar"
-                );
-                c.state = CircuitState::Open {
-                    open_until: now + c.cooldown,
-                };
-            }
-            // Una resposta HalfOpen fallida sempre torna a obrir (el model encara no respon).
-            CircuitState::HalfOpen => {
-                tracing::warn!(cooldown_secs = c.cooldown.as_secs(), "llm: sonda fallida, circuit reobert");
-                c.state = CircuitState::Open {
-                    open_until: now + c.cooldown,
-                };
-            }
-            _ => {}
+        let enabled = c.threshold > 0 && !c.cooldown.is_zero();
+        let was_half_open = matches!(c.state, CircuitState::HalfOpen);
+        let threshold_reached = c.consecutive_fails >= c.threshold;
+        if enabled && (was_half_open || threshold_reached) {
+            // Obre/reobre el circuit. Capem el comptador perquè no creixi sense
+            // límit durant una caiguda llarga (el missatge no ha de dir "milers"
+            // de fallades "seguides": el circuit porta estona obert).
+            c.consecutive_fails = c.threshold.max(1);
+            let msg = if was_half_open {
+                "llm: sonda fallida, circuit reobert"
+            } else {
+                "llm: circuit OBERT (massa fallades seguides), pausa abans de tornar-ho a provar"
+            };
+            tracing::warn!(threshold = c.threshold, cooldown_secs = c.cooldown.as_secs(), "{msg}");
+            c.state = CircuitState::Open {
+                open_until: now + c.cooldown,
+            };
         }
     }
 
