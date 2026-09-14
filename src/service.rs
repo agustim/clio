@@ -12,6 +12,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+/// El "reaper" s'omet una passada si hi ha com a mínim aquest nombre de links
+/// pendents (shallow) encara per processar: donem prioritat al contingut NOU
+/// (notícies dels feeds) per sobre del reintent de feina vella fallida.
+const REAPER_SKIP_PENDING_THRESHOLD: i64 = 32;
+
 /// Estat compartit per API, CLI i Bot.
 #[derive(Clone)]
 pub struct AppState {
@@ -182,6 +187,14 @@ impl AppState {
     /// Retorna quants s'han re-encuat.
     pub async fn retry_failed_batch(&self, limit: i64) -> Result<usize> {
         if limit <= 0 {
+            return Ok(0);
+        }
+        // PRIORITAT AL CONTINGUT NOU: si hi ha força links pendents (notícies
+        // fresques encara sense processar), no hi barregem feina vella del reaper
+        // perquè no els robi la cua (evita que el ticker/overlay es quedi enrere).
+        let pending = self.db.pending_shallow_count().await?;
+        if pending >= REAPER_SKIP_PENDING_THRESHOLD {
+            tracing::debug!(pending, "reaper: s'omet per prioritat (contingut nou pendent)");
             return Ok(0);
         }
         // Repartim el llindar entre shallow i deep (la meitat cadascun).

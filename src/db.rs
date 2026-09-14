@@ -711,14 +711,28 @@ impl Db {
 
     // ---- Recovery (re-encua feina pendent en arrencar) ----
 
-    /// Links amb shallow pendent/encallat o fallit.
+    /// Links amb shallow pendent/encallat a mig procés: només els que encara
+    /// han de passar (o van quedar a l'aire en un reinici). Els `failed` s'EXCLOUEN:
+    /// el "reaper" se n'encarrega de forma gradual, perquè no tocar-los tots en
+    /// arrencar no torni a inundar la cua i a fer que el contingut nou mori de fam.
     pub async fn pending_shallow_ids(&self) -> Result<Vec<Uuid>> {
         let rows = sqlx::query(
-            "SELECT id FROM links WHERE status IN ('pending','processing','failed')",
+            "SELECT id FROM links WHERE status IN ('pending','processing')",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
+    /// Quants links hi ha ara pendents (shallow) de processar. Ho fa servir el
+    /// "reaper" per saber si hi ha contingut nou acumulat i fer-li lloc.
+    pub async fn pending_shallow_count(&self) -> Result<i64> {
+        let r = sqlx::query(
+            "SELECT COUNT(*) FROM links WHERE status IN ('pending','processing')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(r.try_get(0)?)
     }
 
     /// Links amb shallow fet però deep pendent/encallat.
