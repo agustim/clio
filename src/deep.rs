@@ -153,11 +153,7 @@ async fn run_git(cfg: &Config, args: &[&str]) -> Result<()> {
     cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_LFS_SKIP_SMUDGE", "1");
-    let fut = cmd.output();
-    let out = tokio::time::timeout(Duration::from_secs(cfg.clone_timeout_secs), fut)
-        .await
-        .map_err(|_| AppError::Pipeline("git: timeout".into()))?
-        .map_err(|e| AppError::Pipeline(format!("git spawn: {e}")))?;
+    let out = run_child_timeout(cfg, &mut cmd, "git").await?;
     if !out.status.success() {
         return Err(AppError::Pipeline(format!(
             "git failed: {}",
@@ -165,6 +161,65 @@ async fn run_git(cfg: &Config, args: &[&str]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Executa un procés i espera'n la sortida amb timeout.
+///
+/// CRÍTIC: quan el timeout expira s'ha de matar el procés i, sobretot, ESPERAR-LO
+/// (`wait`, és a dir `waitpid`) per reaparellar-lo. Un fill que no es reaparella
+/// es queda com a zombie; l'acumulació de zombies exhaureix el límit de
+/// processos del contenidor i aleshores qualsevol intent de crear un fil o procés
+/// nou falla amb EAGAIN ("Resource temporarily unavailable (os error 11)"),
+/// inclosos els workers del pool de SQLite — que és l'origen dels errors
+/// "database error: error communicating with database" i els avisos de Telegram
+/// "⚠️ Anàlisi fallida". (Abans es feia `cmd.output()` dins de `timeout(...)`:
+/// el Child es descartava sense matar ni reaparellar.)
+async fn run_child_timeout(
+    cfg: &Config,
+    cmd: &mut tokio::process::Command,
+    what: &str,
+) -> Result<std::process::Output> {
+    use tokio::io::AsyncReadExt;
+    let timeout = Duration::from_secs(cfg.clone_timeout_secs);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::Pipeline(format!("{what} spawn: {e}")))?;
+
+    // Traiem les pipes de stdout/stderr per poder-les llegir mentre el procés
+    // corre, i mantenim el Child accessible per poder-lo matar/reaparellar a
+    // l'arms del timeout.
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+
+    let wait = async {
+        let read_out = async {
+            if let Some(s) = so.as_mut() {
+                let _ = s.read_to_end(&mut stdout).await;
+            }
+        };
+        let read_err = async {
+            if let Some(s) = se.as_mut() {
+                let _ = s.read_to_end(&mut stderr).await;
+            }
+        };
+        tokio::join!(read_out, read_err);
+        child.wait().await
+    };
+
+    match tokio::time::timeout(timeout, wait).await {
+        Ok(Ok(status)) => Ok(std::process::Output { status, stdout, stderr }),
+        Ok(Err(e)) => Err(AppError::Pipeline(format!("{what} wait: {e}"))),
+        Err(_) => {
+            // Timeout: matem el procés i (crucialment) l'esperem per NO deixar
+            // cap zombie al contenidor.
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+            Err(AppError::Pipeline(format!("{what}: timeout")))
+        }
+    }
 }
 
 #[derive(Default)]
@@ -470,11 +525,7 @@ async fn ytdlp_transcript(cfg: &Config, url: &str) -> Result<String> {
 async fn run_ytdlp(cfg: &Config, args: &[&str]) -> Result<Vec<u8>> {
     let mut cmd = tokio::process::Command::new("yt-dlp");
     cmd.args(args);
-    let fut = cmd.output();
-    let out = tokio::time::timeout(Duration::from_secs(cfg.clone_timeout_secs), fut)
-        .await
-        .map_err(|_| AppError::Pipeline("yt-dlp: timeout".into()))?
-        .map_err(|e| AppError::Pipeline(format!("yt-dlp spawn: {e}")))?;
+    let out = run_child_timeout(cfg, &mut cmd, "yt-dlp").await?;
     if !out.status.success() {
         return Err(AppError::Pipeline(format!(
             "yt-dlp failed: {}",
