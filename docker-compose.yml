@@ -15,6 +15,7 @@ services:
       target: app   # imatge lleugera: només serve (el stream té el seu propi compose)
     image: ghcr.io/agustim/clio:latest
     restart: unless-stopped
+    init: true
     env_file: .env
     environment:
       BIND_ADDR: 0.0.0.0:8080

@@ -21,6 +21,7 @@ services:
     #   context: .
     #   target: app
     restart: unless-stopped
+    init: true
     env_file: .env
     environment:
       BIND_ADDR: 0.0.0.0:8080
