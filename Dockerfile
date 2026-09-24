@@ -27,9 +27,13 @@ RUN cargo build --release --bin linkanalyzer
 
 # ---- app: runtime lleuger (clio serve) ----
 FROM debian:trixie-slim AS app
+# yt-dlp: installem el més recent des de PyPI (el de Debian és massa vell per als
+# canvis freqüents de YouTube). El necessita la passada profunda de vídeo
+# (deep_video -> subtítols automàtics amb --skip-download, sense ffmpeg).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
+        ca-certificates git libstdc++6 python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --break-system-packages --no-cache-dir yt-dlp
 WORKDIR /app
 # public/ no es copia: serve el regenera a l'arrencada (HTML/CSS/JS incrustats al binari).
 # assets/ sí es copia: conté la música de fons de l'overlay en domini públic
