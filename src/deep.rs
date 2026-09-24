@@ -183,6 +183,12 @@ async fn run_child_timeout(
     let timeout = Duration::from_secs(cfg.clone_timeout_secs);
 
     let mut child = cmd
+        // IMPORTANT: pipes de stdout/stderr (abans `cmd.output()` les posava
+        // implícitament). Sense això `child.stdout.take()`/`stderr.take()` donen
+        // None, es perd la sortida i el git/yt-dlp escriu directament als logs
+        // del contenidor (stale output, errors sense detall).
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| AppError::Pipeline(format!("{what} spawn: {e}")))?;
 
