@@ -265,33 +265,27 @@ fn heuristic_analysis(title: &str, text: &str, max_chars: usize) -> Analysis {
     }
 }
 
-/// Retalla un títol a ~80 caràcters respectant límits de paraula.
-pub fn clamp_title(s: &str) -> String {
-    const MAX: usize = 80;
-    let t = s.trim();
-    if t.chars().count() <= MAX {
-        return t.to_string();
-    }
-    let truncated: String = t.chars().take(MAX).collect();
-    let cut = match truncated.rfind(' ') {
-        Some(i) if i >= MAX / 2 => &truncated[..i],
-        _ => truncated.trim_end(),
-    };
-    format!("{}…", cut.trim_end_matches(['.', ',', ' ', '-', ':']))
-}
-
-/// Deriva un títol (curt, ~80 car.) a partir d'una descripció curta que ja és
-/// en català: fa servir les primeres paraules de la primera frase. Es fa servir
-/// com a salvaguarda de llengua perquè el títol mostrat sigui sempre en català
-/// encara que el LLM no n'hagi generat un (en comptes de caure al títol
-/// original de la pàgina, que podria ser en un altre idioma).
+/// Deriva un títol a partir d'una descripció curta que ja és en català: fa
+/// servir les primeres paraules de la primera frase (les primeres 12). Es fa
+/// servir com a salvaguarda de llengua perquè el títol mostrat sigui sempre
+/// en català encara que el LLM no n'hagi generat un (en comptes de caure al
+/// títol original de la pàgina, que podria ser en un altre idioma).
+///
+/// NO es retalla a una longitud màxima: el títol es conserva sencer (dins un
+/// límit generós) perquè la veu que el llegeix en veu alta no perdi el final.
 pub fn title_from_summary(summary: &str) -> String {
     let words: Vec<&str> = summary.split_whitespace().collect();
     if words.is_empty() {
         return String::new();
     }
-    let cut: String = words.iter().take(12).cloned().collect::<Vec<_>>().join(" ");
-    clamp_title(&cut)
+    words
+        .iter()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 /// Obertes de metallenguatge que eliminem quan apareixen a l'inici d'un resum
@@ -646,16 +640,19 @@ async fn run_inner(
         None => heuristic_analysis(&title, &parsed.text, cfg.summary_max_chars),
     };
 
-    // Títol: prioritza el curt del LLM (en català). Si l'LLM no n'ha generat
+    // Títol: prioritza el complet del LLM (en català). Si l'LLM no n'ha generat
     // cap, el derivem de la descripció curta (també en català) per no mostrar
     // el títol original de la pàgina, que podria ser en un altre idioma. Només
-    // sense LLM es retalla directament el títol de la pàgina.
+    // sense LLM es fa servir directament el títol de la pàgina.
+    //
+    // No es retalla: el títol es conserva sencer perquè la veu que el llegeix
+    // (/audio/{id}) no perdi el final del titular.
     let final_title = match (analysis.title.clone(), llm.is_some()) {
         (Some(t), _) => Some(t),
         (_, true) => Some(title_from_summary(&analysis.summary)),
         (_, false) => parsed.title.clone(),
     }
-    .map(|t| clamp_title(&t))
+    .map(|t| t.trim().to_string())
     .filter(|t| !t.is_empty());
 
     Ok((final_title, link_type, analysis, parsed.image))
@@ -830,6 +827,18 @@ mod tests {
             title_from_summary("Les vendes creixen un 3.5% a Catalunya el segon trimestre segons les dades publicades avui pel departament d'economia de la Generalitat de Catalunya."),
             "Les vendes creixen un 3.5% a Catalunya el segon trimestre segons les"
         );
+        // El títol NO es retalla a una longitud màxima: es conserva sencer per
+        // què la veu que el llegeix en veu alta no perdi el final del titular.
+        // (Primeres 12 paraules: aquí superen els 80 caràcters i abans es
+        // retallaven amb "…"; ara es conserven totes, sense "…" final.)
+        let long = title_from_summary(
+            "L'ecosistema tecnològic català impulsa una nova plataforma d'intel·ligència artificial generativa amb suport públic i privat.",
+        );
+        assert!(
+            long.len() > 80 && !long.ends_with('…'),
+            "el títol derivat no s'hauria de retallar: {long}"
+        );
+        assert!(long.ends_with("suport"), "títol tallat pel final: {long}");
         // Buit o només espais => títol buit (es descarta a run_inner).
         assert_eq!(title_from_summary(""), "");
         assert_eq!(title_from_summary("   "), "");

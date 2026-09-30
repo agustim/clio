@@ -73,7 +73,7 @@ impl VoiceConfig {
 
 /// Sintetitza el text amb la veu d'Edge i torna el MP3 cru (24 kHz mono).
 pub async fn synthesize_text(text: &str, cfg: &VoiceConfig) -> Result<Vec<u8>, VoiceError> {
-    // Els titulars son curts (~80 car.); el servei admet fins a ~4 KB.
+    // El titular es llegeix sencer en veu alta; el servei admet fins a ~4 KB.
     edge::synthesize(text, &cfg.voice, &cfg.lang, &cfg.rate).await
 }
 

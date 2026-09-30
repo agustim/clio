@@ -69,7 +69,8 @@ pub async fn maybe_generate(
     let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) else {
         return false;
     };
-    // El servei admet ~4 KB; els titols del pipeline van clampats a ~80 car.
+    // El servei admet ~4 KB, però per seguretat no enviem mai més de 2000
+    // bytes de text (la veu el llegiria sencer; no hi ha retall previ).
     let title = if title.len() > 2000 {
         tracing::warn!(%link_id, len = title.len(), "titol massa llarg per a veu; es retalla");
         &title[..2000]

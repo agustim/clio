@@ -164,7 +164,9 @@ pub struct Report {
 /// Resultat de l'analisi del pipeline (LLM o fallback).
 #[derive(Debug, Clone)]
 pub struct Analysis {
-    /// Títol curt (≤ ~80 car.) generat pel LLM; None => s'usa el títol de la pàgina.
+    /// Titular complet (en català) generat pel LLM; None => s'usa el títol de
+    /// la pàgina. No es retalla: el mateix text és el que llegeix en veu alta
+    /// la veu TTS (/audio/{id}).
     pub title: Option<String>,
     pub summary: String,
     pub tags: Vec<String>,

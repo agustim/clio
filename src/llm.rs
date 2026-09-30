@@ -402,7 +402,9 @@ impl LlmClient {
         let prompt = format!(
             "Ets un analista de continguts. IMPORTANT: TOT el text que generis (títol, resum i \
              tags) ha d'estar integrament en CATALÀ.\n\
-             - Genera un títol curt, periodístic i en català (màxim 80 caràcters, sense cometes).\n\
+             - Genera el titular complet de la notícia, periodístic i en català \
+             (sense cometes). No el truncis ni l'abreugis: conserva tota la informació \
+             essencial, perquè el titular es llegeix en veu alta.\n\
              - Resumeix el text en català en màxim {max_chars} caràcters amb una única frase de \
              PROSA PERIODÍSTICA que comenci directament pel contingut. No obris mai amb \
              presentacions metalingüístiques com «L’article descriu...», «Aquest text...», \
