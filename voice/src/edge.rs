@@ -11,9 +11,9 @@
 //! Sortida: MP3 `audio-24khz-48kbitrate-mono-mp3` (el mateix format que usa
 //! el `voice-convert` Node).
 
+use crate::gec;
 use crate::VoiceError;
 use futures_util::{SinkExt, StreamExt};
-use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -32,12 +32,12 @@ const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 /// 403, puja aquesta constant (i SEC_MS_GEC_VERSION) a la darrera versio
 /// d'Edge (https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes).
 const CHROMIUM_FULL_VERSION: &str = "143.0.3650.75";
-const SEC_MS_GEC_VERSION: &str = "1-143.0.3650.75";
+/// v2 des del 2026-10-10: Microsoft només accepta tokens `Sec-MS-GEC` v2
+/// (el prefix `2-`). Si el servei torna a fer 403, caldrà pujar la versió.
+const SEC_MS_GEC_VERSION: &str = "2-143.0.3650.75";
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 /// Marca dels frames binaris que porten veu.
 const PATH_AUDIO: &[u8] = b"Path:audio";
-/// Epoch de Windows (1601-01-01 a 1970-01-01), en segons.
-const WIN_EPOCH_S: i128 = 11_644_473_600;
 
 fn user_agent() -> String {
     let major = CHROMIUM_FULL_VERSION
@@ -51,29 +51,8 @@ fn user_agent() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// DRM: token Sec-MS-GEC
+// DRM: token Sec-MS-GEC v2 (implementat a `crate::gec`, port de edge-tts 7.3.1)
 // ---------------------------------------------------------------------------
-
-/// Genera el token `Sec-MS-GEC`. Falseja: ticks = (unix + WIN_EPOCH) truncat
-/// als 5 minuts, x10^7 (100-nanoseconds), i hash SHA-256 de
-/// `"{ticks:.0}{TRUSTED_CLIENT_TOKEN}"` en hexa majuscules.
-fn generate_sec_ms_gec() -> String {
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i128)
-        .unwrap_or(0);
-    let mut ticks = unix + WIN_EPOCH_S;
-    ticks -= ticks % 300; // arrodonim a baix als 5 minuts
-    ticks *= 10_000_000;
-
-    let str_to_hash = format!("{ticks}{TRUSTED_CLIENT_TOKEN}");
-    let hash = Sha256::digest(str_to_hash.as_bytes());
-    let mut out = String::with_capacity(64);
-    for b in hash {
-        out.push_str(&format!("{b:02X}"));
-    }
-    out
-}
 
 // ---------------------------------------------------------------------------
 // Preparacio del text
@@ -222,7 +201,7 @@ pub async fn synthesize(
     let escaped = xml_escape(&cleaned);
     let conn_id = Uuid::new_v4().simple().to_string();
     let muid = Uuid::new_v4().simple().to_string();
-    let gec = generate_sec_ms_gec();
+    let gec = gec::generate_sec_ms_gec_v2();
 
     let url = format!(
         "{WSS_BASE}?TrustedClientToken={TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC={gec}\

@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod edge;
+pub mod gec;
 
 /// Errors del pipeline de veu.
 #[derive(Debug, thiserror::Error)]
