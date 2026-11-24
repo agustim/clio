@@ -256,20 +256,29 @@ impl AppState {
                 continue; // ja en té
             }
             checked += 1;
-            match crate::pipeline::fetch(&self.http, &self.cfg, &l.url).await {
-                Ok(html) => {
-                    let img = crate::pipeline::parse(&html).image;
-                    if let Some(img) = img {
-                        match self.db.set_link_image(id, Some(&img)).await {
-                            Ok(()) => {
-                                tracing::info!(%id, url = %l.url, "imatge obtinguda");
-                                updated += 1;
-                            }
-                            Err(e) => tracing::warn!(%id, error = %e, "desar imatge fallit"),
-                        }
+            // Els tuits no es poden llegir amb un GET (mur de login): la imatge
+            // surt de la fitxa pública de fxtwitter.
+            let img = if crate::social::is_twitter_url(&l.url) {
+                crate::social::fetch_tweet_info(&self.http, &l.url)
+                    .await
+                    .and_then(|i| i.image())
+            } else {
+                match crate::pipeline::fetch(&self.http, &self.cfg, &l.url).await {
+                    Ok(html) => crate::pipeline::parse(&html).image,
+                    Err(e) => {
+                        tracing::info!(%id, error = %e, "backfill imatge: fetch fallit");
+                        None
                     }
                 }
-                Err(e) => tracing::info!(%id, error = %e, "backfill imatge: fetch fallit"),
+            };
+            if let Some(img) = img {
+                match self.db.set_link_image(id, Some(&img)).await {
+                    Ok(()) => {
+                        tracing::info!(%id, url = %l.url, "imatge obtinguda");
+                        updated += 1;
+                    }
+                    Err(e) => tracing::warn!(%id, error = %e, "desar imatge fallit"),
+                }
             }
         }
         Ok((updated, checked))
@@ -302,6 +311,27 @@ impl AppState {
             }
         }
         Ok((cached, checked))
+    }
+
+    /// Backfill de l'anàlisi profunda dels tuits de X/Twitter ja processats
+    /// abans d'habilitar-ne el deep: els torna a passar (fitxa del twitt +
+    /// resum en català). Retorna (fets, candidats).
+    pub async fn backfill_deep(&self, limit: i64) -> Result<(usize, usize)> {
+        let ids = self.db.social_deep_pending_ids(limit).await?;
+        let total = ids.len();
+        let llm = self.llm.as_deref();
+        let mut done = 0usize;
+        for id in ids {
+            if let Err(e) = self.db.set_deep_status(id, DeepStatus::Pending).await {
+                tracing::warn!(%id, error = %e, "backfill deep: set_deep_status fallit");
+                continue;
+            }
+            match deep::process_deep(&self.db, &self.cfg, &self.http, llm, id).await {
+                Ok(()) => done += 1,
+                Err(e) => tracing::warn!(%id, error = %e, "backfill deep fallit"),
+            }
+        }
+        Ok((done, total))
     }
 
     /// Processament complet inline (shallow + deep) — usat per la CLI, que no

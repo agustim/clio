@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::error::{AppError, Result};
 use crate::llm::LlmClient;
-use crate::models::LinkType;
+use crate::models::{Link, LinkType};
 use crate::pipeline;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -27,6 +27,11 @@ pub async fn process_deep(
             deep_article(cfg, http, llm, &link.url).await.map(|s| (s, None))
         }
         LinkType::Video => deep_video(cfg, llm, &link.url).await,
+        // Tuits de X/Twitter: llegim la fitxa pública (fxtwitter) i n'analitzem
+        // el contingut. La resta de socials no tenen deep.
+        LinkType::Social if crate::social::is_twitter_url(&link.url) => {
+            deep_tweet(db, cfg, http, llm, &link).await
+        }
         _ => Ok(("(no aplica)".to_string(), None)),
     };
 
@@ -390,6 +395,134 @@ fn repo_fallback(scan: &CodeScan, readme: Option<&str>) -> String {
     s
 }
 
+// ---------- TUITS (X/Twitter) ----------
+
+/// Deep d'un tuit: recupera la fitxa pública (text, autor, mètriques, media)
+/// via fxtwitter, la desa a `code_stats` i en fa una anàlisi en català.
+///
+/// La fitxa es desa ABANS de cridar l'LLM: si el model falla, la web ja pot
+/// mostrar autor/mètriques/text i el deep queda `failed` per reintentar-se.
+async fn deep_tweet(
+    db: &Db,
+    cfg: &Config,
+    http: &reqwest::Client,
+    llm: Option<&LlmClient>,
+    link: &Link,
+) -> Result<(String, Option<Value>)> {
+    let Some(info) = crate::social::fetch_tweet_info(http, &link.url).await else {
+        // Twitt esborrat/protegit o API caiguda: no deixem el deep en `failed`
+        // per sempre (es reintentaria en bucle); conservem el resum ja publicat
+        // i la fitxa prèvia (si n'hi havia) en lloc d'esborrar-la.
+        tracing::info!(url = %link.url, "deep tweet: sense dades públiques del twitt");
+        return Ok((existing_tweet_summary(link), link.code_stats.clone()));
+    };
+
+    let stats = tweet_stats(&info);
+    if let Err(e) = db.set_deep_stats(link.id, &stats).await {
+        tracing::warn!(link_id = %link.id, error = %e, "deep tweet: no s'han pogut desar les stats");
+    }
+    // Imatge d'acompanyament (foto o miniatura del vídeo) si encara no en tenia:
+    // així el deep també arregla els tuits antics sense imatge.
+    if link.image_url.is_none() {
+        if let Some(img) = info.image() {
+            match db.set_link_image(link.id, Some(&img)).await {
+                Ok(()) => {
+                    // Còpia local (data/images) perquè la web estàtica la pugui
+                    // servir sense dependre del proxy /img.
+                    if let Err(e) = pipeline::cache_link_image(db, cfg, http, link.id, &img).await {
+                        tracing::warn!(link_id = %link.id, error = %e, "deep tweet: còpia local d'imatge fallida");
+                    }
+                }
+                Err(e) => tracing::warn!(link_id = %link.id, error = %e, "deep tweet: no s'ha pogut desar la imatge"),
+            }
+        }
+    }
+
+    let text: String = info.text.trim().chars().take(16000).collect();
+    if text.is_empty() {
+        tracing::info!(url = %link.url, "deep tweet: text buit (només media)");
+        return Ok((existing_tweet_summary(link), Some(stats)));
+    }
+
+    let summary = match llm {
+        Some(client) => {
+            let prompt = tweet_prompt(&info, &text, cfg.summary_max_words * 2);
+            // Fallada del LLM => es propaga (deep `failed`, reintentable) en lloc
+            // de publicar el text original en un altre idioma.
+            let s = client.complete(&prompt).await?;
+            pipeline::polish_summary(&s)
+        }
+        None => article_fallback(&text, cfg.summary_max_words * 2),
+    };
+    Ok((summary, Some(stats)))
+}
+
+/// Resum de reserva quan no hi ha contingut nou del twitt.
+fn existing_tweet_summary(link: &Link) -> String {
+    link.summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(no aplica)")
+        .to_string()
+}
+
+/// Fitxa estructurada del twitt per a `code_stats` (la llegeix la web i,
+/// potencialment, l'overlay).
+fn tweet_stats(info: &crate::social::TweetInfo) -> Value {
+    let media: Vec<Value> = info
+        .media
+        .iter()
+        .map(|m| json!({ "kind": m.kind, "url": m.url, "thumbnail_url": m.thumbnail_url }))
+        .collect();
+    json!({
+        "kind": "tweet",
+        "author": {
+            "name": info.author_name,
+            "screen_name": info.author_screen,
+            "url": info.author_url,
+            "avatar_url": info.avatar_url,
+            "followers": info.followers,
+        },
+        "created_at": info.created_at,
+        "created_timestamp": info.created_timestamp,
+        "likes": info.likes,
+        "retweets": info.retweets,
+        "replies": info.replies,
+        "quotes": info.quotes,
+        "bookmarks": info.bookmarks,
+        "views": info.views,
+        "lang": info.lang,
+        "media": media,
+        "text": info.text.chars().take(2000).collect::<String>(),
+    })
+}
+
+/// Prompt de l'anàlisi profunda d'un tuit (en català, fidel al text).
+fn tweet_prompt(info: &crate::social::TweetInfo, text: &str, max_words: usize) -> String {
+    let author = match (info.author_name.as_str(), info.author_screen.as_str()) {
+        ("", "") => "un usuari de X".to_string(),
+        ("", h) => format!("@{h}"),
+        (n, "") => n.to_string(),
+        (n, h) => format!("{n} (@{h})"),
+    };
+    let media_desc = if info.media.iter().any(|m| m.kind != "photo") {
+        " Acompanya el tuit amb mitjans audiovisuals (vídeo/GIF); no els pots veure: basat només en el text."
+    } else if !info.media.is_empty() {
+        " Acompanya el tuit amb imatges; no les pots veure: basat només en el text."
+    } else {
+        ""
+    };
+    format!(
+        "Ets un analista. Aquest és un tuit de X/Twitter de {author}.{media_desc}\n\
+         Escriu EN CATALÀ una anàlisi en prosa periodística (context, idees clau i \
+         conclusions) en menys de {max_words} paraules.\n\
+         IMPORTANT: comença directament pel contingut — no obris amb «Aquest tuit parla de...», \
+         «L'autor explica...» ni frases metalingüístiques similars. Sé fidel al text: no inventis \
+         fets, xifres ni opinions que no hi siguin.\n\n{text}"
+    )
+}
+
 // ---------- ARTICLES ----------
 
 /// Re-descarrega el text complet (sense truncar a 4000) i en fa un resum llarg.
@@ -614,5 +747,98 @@ struct TmpGuard(PathBuf);
 impl Drop for TmpGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{DeepStatus, LinkStatus, Sentiment};
+    use crate::social::{MediaItem, TweetInfo};
+
+    fn info() -> TweetInfo {
+        TweetInfo {
+            text: "Opus 5 va escriure 5500 línies de codi per renderitzar el Senyor dels Anells.".into(),
+            author_name: "Andrej Karpathy".into(),
+            author_screen: "karpathy".into(),
+            author_url: Some("https://x.com/karpathy".into()),
+            avatar_url: Some("https://pbs.twimg.com/a.jpg".into()),
+            followers: 4_470_090,
+            created_at: Some("2026-08-02T03:00:09Z".into()),
+            created_timestamp: Some(1_785_639_609),
+            likes: 29_790,
+            retweets: 2_311,
+            replies: 1_803,
+            quotes: 753,
+            bookmarks: 12_127,
+            views: 6_323_136,
+            lang: "en".into(),
+            media: vec![MediaItem {
+                kind: "video".into(),
+                url: "https://video.twimg.com/v.mp4".into(),
+                thumbnail_url: Some("https://pbs.twimg.com/t.jpg".into()),
+            }],
+        }
+    }
+
+    fn link(summary: Option<&str>) -> Link {
+        let now = chrono::Utc::now();
+        Link {
+            id: Uuid::new_v4(),
+            url: "https://x.com/karpathy/status/1".into(),
+            title: Some("t".into()),
+            summary: summary.map(String::from),
+            link_type: LinkType::Social,
+            tags: Vec::new(),
+            sentiment: Sentiment::Neutral,
+            status: LinkStatus::Done,
+            co_reporters: Vec::new(),
+            reporters: Vec::new(),
+            deep_status: DeepStatus::Processing,
+            deep_summary: None,
+            code_stats: None,
+            image_url: None,
+            image_file: None,
+            audio_file: None,
+            embedding: None,
+            embed_scale: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn tweet_stats_carry_author_metrics_media_and_text() {
+        let s = tweet_stats(&info());
+        assert_eq!(s["kind"], "tweet");
+        assert_eq!(s["author"]["screen_name"], "karpathy");
+        assert_eq!(s["author"]["followers"].as_u64(), Some(4_470_090));
+        assert_eq!(s["likes"].as_u64(), Some(29_790));
+        assert_eq!(s["views"].as_u64(), Some(6_323_136));
+        assert_eq!(s["created_timestamp"].as_i64(), Some(1_785_639_609));
+        assert_eq!(s["media"][0]["kind"], "video");
+        assert_eq!(s["media"][0]["thumbnail_url"], "https://pbs.twimg.com/t.jpg");
+        assert!(s["text"].as_str().unwrap().contains("5500 línies"));
+        // El text gran es retalla (no infla l'índex de la web).
+        let mut big = info();
+        big.text = "a".repeat(5000);
+        assert_eq!(tweet_stats(&big)["text"].as_str().unwrap().chars().count(), 2000);
+    }
+
+    #[test]
+    fn tweet_prompt_is_catalan_and_faithful() {
+        let p = tweet_prompt(&info(), "text del tuit", 400);
+        assert!(p.contains("EN CATALÀ"));
+        assert!(p.contains("Andrej Karpathy (@karpathy)"));
+        assert!(p.contains("no inventis"));
+        assert!(p.contains("text del tuit"));
+        assert!(p.contains("400"));
+    }
+
+    #[test]
+    fn existing_summary_falls_back_to_existing_or_placeholder() {
+        assert_eq!(existing_tweet_summary(&link(Some("resum curt"))), "resum curt");
+        assert_eq!(existing_tweet_summary(&link(Some("   "))), "(no aplica)");
+        assert_eq!(existing_tweet_summary(&link(None)), "(no aplica)");
     }
 }

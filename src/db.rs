@@ -634,6 +634,20 @@ impl Db {
         Ok(())
     }
 
+    /// Desa només les estadístiques (`code_stats`) d'un link, sense tocar
+    /// `deep_status`: la fitxa del twitt (autor, mètriques, media) es publica
+    /// encara que l'LLM falli o trigui a generar l'anàlisi profunda.
+    pub async fn set_deep_stats(&self, link_id: Uuid, stats: &serde_json::Value) -> Result<()> {
+        let stats = serde_json::to_string(stats)?;
+        sqlx::query("UPDATE links SET code_stats = ?, updated_at = ? WHERE id = ?")
+            .bind(stats)
+            .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Actualitza només la imatge d'acompanyament d'un link (p.ex. backfill
     /// d'imatges; no toca res més de l'anàlisi).
     pub async fn set_link_image(&self, link_id: Uuid, image: Option<&str>) -> Result<()> {
@@ -768,6 +782,25 @@ impl Db {
         let rows = sqlx::query(
             "SELECT id FROM links WHERE status = 'done' AND deep_status = 'failed' \
              ORDER BY updated_at ASC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| parse_uuid(r.get::<String, _>("id").as_str())).collect())
+    }
+
+    /// Tuits ja processats (shallow) que encara no tenen l'anàlisi profunda:
+    /// per al backfill dels links recollits abans d'habilitar el deep de tuits.
+    pub async fn social_deep_pending_ids(&self, limit: i64) -> Result<Vec<Uuid>> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT id FROM links WHERE status = 'done' AND link_type = 'social' \
+               AND deep_status != 'done' AND (lower(url) LIKE '%//x.com/%' \
+               OR lower(url) LIKE '%//twitter.com/%' OR lower(url) LIKE '%.x.com/%' \
+               OR lower(url) LIKE '%.twitter.com/%') \
+             ORDER BY created_at DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -952,6 +985,81 @@ mod tests {
         for l in &items {
             assert_eq!(l.deep_status, DeepStatus::Done);
             assert_ne!(l.deep_summary.as_deref().map(str::trim).unwrap_or(""), "");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_deep_stats_stores_json_without_touching_deep_status() {
+        let db = temp_db().await;
+        let reporter = Uuid::new_v4();
+        let l = db.create_link("https://x.com/u/status/1", reporter).await.unwrap();
+        db.set_link_status(l.id, LinkStatus::Done).await.unwrap();
+
+        let stats = serde_json::json!({ "kind": "tweet", "likes": 12 });
+        db.set_deep_stats(l.id, &stats).await.unwrap();
+
+        let got = db.link_by_id(l.id).await.unwrap().unwrap();
+        assert_eq!(got.code_stats.as_ref(), Some(&stats));
+        // La fitxa no implica que l'anàlisi profunda estigui feta.
+        assert_eq!(got.deep_status, DeepStatus::None);
+    }
+
+    #[tokio::test]
+    async fn social_deep_pending_ids_only_returns_pending_x_tweets() {
+        let db = temp_db().await;
+        let reporter = Uuid::new_v4();
+
+        // Tuit de X pendent de deep -> SÍ.
+        let tweet = db.create_link("https://x.com/u/status/1", reporter).await.unwrap();
+        db.set_link_status(tweet.id, LinkStatus::Done).await.unwrap();
+        db.update_link_analysis(tweet.id, Some("t"), LinkType::Social, &analysis(), None)
+            .await
+            .unwrap();
+        // Tuit de Twitter amb deep fallit -> SÍ (es reintenta).
+        let tw = db.create_link("https://twitter.com/u/status/2", reporter).await.unwrap();
+        db.set_link_status(tw.id, LinkStatus::Done).await.unwrap();
+        db.update_link_analysis(tw.id, Some("t"), LinkType::Social, &analysis(), None)
+            .await
+            .unwrap();
+        db.set_deep_status(tw.id, DeepStatus::Failed).await.unwrap();
+        // Tuit ja amb deep complet -> NO.
+        let done = db.create_link("https://x.com/u/status/3", reporter).await.unwrap();
+        db.set_link_status(done.id, LinkStatus::Done).await.unwrap();
+        db.update_link_analysis(done.id, Some("t"), LinkType::Social, &analysis(), None)
+            .await
+            .unwrap();
+        db.update_deep_analysis(done.id, "anàlisi", None).await.unwrap();
+        // Instagram (social, sense deep) -> NO.
+        let ig = db.create_link("https://www.instagram.com/p/abc", reporter).await.unwrap();
+        db.set_link_status(ig.id, LinkStatus::Done).await.unwrap();
+        db.update_link_analysis(ig.id, Some("t"), LinkType::Social, &analysis(), None)
+            .await
+            .unwrap();
+        // Article pendent -> NO (només socials).
+        let art = db.create_link("https://ex.com/a", reporter).await.unwrap();
+        db.set_link_status(art.id, LinkStatus::Done).await.unwrap();
+
+        let ids = db.social_deep_pending_ids(50).await.unwrap();
+        let mut urls: Vec<String> = Vec::new();
+        for id in &ids {
+            urls.push(db.link_by_id(*id).await.unwrap().unwrap().url);
+        }
+        urls.sort();
+        assert_eq!(
+            urls,
+            vec!["https://twitter.com/u/status/2", "https://x.com/u/status/1"],
+            "només els tuits de X/Twitter sense deep complet"
+        );
+        // limit 0/negatiu: cap.
+        assert!(db.social_deep_pending_ids(0).await.unwrap().is_empty());
+    }
+
+    fn analysis() -> crate::models::Analysis {
+        crate::models::Analysis {
+            title: Some("t".into()),
+            summary: "resum".into(),
+            tags: vec!["a".into()],
+            sentiment: Sentiment::Neutral,
         }
     }
 }

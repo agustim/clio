@@ -142,11 +142,18 @@ impl Link {
     }
 
     /// Decideix si aquest link mereix una segona passada profunda.
+    ///
+    /// Els tuits de X/Twitter també: el contingut públic es pot rellegir via
+    /// fxtwitter i en fem la fitxa (autor, mètriques, media) + anàlisi en català.
+    /// La resta de socials (Instagram, TikTok, Bluesky…) segueixen sense deep.
     pub fn deep_applicable(&self) -> bool {
-        matches!(
-            self.link_type,
-            LinkType::Repo | LinkType::Article | LinkType::Blog | LinkType::News | LinkType::Video
-        )
+        match self.link_type {
+            LinkType::Repo | LinkType::Article | LinkType::Blog | LinkType::News | LinkType::Video => {
+                true
+            }
+            LinkType::Social => crate::social::is_twitter_url(&self.url),
+            _ => false,
+        }
     }
 }
 
@@ -171,4 +178,51 @@ pub struct Analysis {
     pub summary: String,
     pub tags: Vec<String>,
     pub sentiment: Sentiment,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(url: &str, link_type: LinkType) -> Link {
+        let now = Utc::now();
+        Link {
+            id: Uuid::new_v4(),
+            url: url.to_string(),
+            title: None,
+            summary: None,
+            link_type,
+            tags: Vec::new(),
+            sentiment: Sentiment::Neutral,
+            status: LinkStatus::Done,
+            co_reporters: Vec::new(),
+            reporters: Vec::new(),
+            deep_status: DeepStatus::None,
+            deep_summary: None,
+            code_stats: None,
+            image_url: None,
+            image_file: None,
+            audio_file: None,
+            embedding: None,
+            embed_scale: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn deep_applicable_covers_articles_repos_videos_and_tweets() {
+        assert!(link("https://ex.com/a", LinkType::Article).deep_applicable());
+        assert!(link("https://github.com/x/y", LinkType::Repo).deep_applicable());
+        assert!(link("https://youtu.be/x", LinkType::Video).deep_applicable());
+        assert!(link("https://ex.com/blog/x", LinkType::Blog).deep_applicable());
+        assert!(link("https://ex.com/news/x", LinkType::News).deep_applicable());
+        // Tuits de X/Twitter: sí (hi ha contingut públic via fxtwitter).
+        assert!(link("https://x.com/u/status/1", LinkType::Social).deep_applicable());
+        assert!(link("https://twitter.com/u/status/1", LinkType::Social).deep_applicable());
+        // Altres socials: no (segueixen amb deep_status='none').
+        assert!(!link("https://www.instagram.com/p/abc", LinkType::Social).deep_applicable());
+        assert!(!link("https://bsky.app/profile/a/post/1", LinkType::Social).deep_applicable());
+        assert!(!link("https://ex.com", LinkType::Other).deep_applicable());
+    }
 }

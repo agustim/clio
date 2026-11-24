@@ -613,6 +613,21 @@ html[data-theme="light"] .theme-icon::before { content: "☀️"; }
 .codestats .langs { display: flex; flex-wrap: wrap; gap: .35rem; }
 .codestats .lang { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 6px; padding: .1rem .4rem; }
 .codestats .lang i { color: var(--accent); font-style: normal; }
+
+/* Fitxa del tuit (X/Twitter): autor, mètriques i text original */
+.tweetinfo { display: flex; gap: .6rem; align-items: flex-start; padding: .5rem .6rem; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; }
+.tweetinfo .tw-av { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; background: var(--card); }
+.tweetinfo .tw-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: .3rem; }
+.tweetinfo .tw-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem; font-size: .82rem; }
+.tweetinfo .tw-author { color: var(--fg); font-weight: 600; text-decoration: none; }
+.tweetinfo .tw-author:hover { text-decoration: underline; }
+.tweetinfo .tw-handle { color: var(--muted); font-size: .78rem; }
+.tweetinfo .tw-date, .tweetinfo .tw-lang { color: var(--faint); font-size: .74rem; }
+.tweetinfo .tw-lang { text-transform: uppercase; border: 1px solid var(--border); border-radius: 5px; padding: 0 .25rem; }
+.tweetinfo .tw-metrics { display: flex; flex-wrap: wrap; gap: .55rem; font-size: .76rem; color: var(--muted); }
+.tweetinfo .tw-text summary { cursor: pointer; color: var(--accent); font-size: .78rem; user-select: none; }
+.tweetinfo .tw-text p { margin: .35rem 0; color: var(--muted); font-size: .84rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tweetinfo .tw-text a { color: var(--accent); font-size: .76rem; }
 .deep { border-top: 1px dashed var(--border); padding-top: .5rem; font-size: .85rem; }
 .deep summary { cursor: pointer; color: var(--accent); font-weight: 500; user-select: none; }
 
@@ -1436,6 +1451,57 @@ function buildFilters() {
 
 const SENT_LABEL = { positive: 'Positiu', neutral: 'Neutral', negative: 'Negatiu' };
 
+// ---- Fitxa pública del tuit (X/Twitter) ----
+// La genera la segona passada a code_stats (kind:'tweet'): autor, data,
+// mètriques i text original. Es mostra dins "Detalls".
+function isHttpUrl(u) { return typeof u === 'string' && /^https?:\/\//i.test(u.trim()); }
+function fmtNum(n) {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n/1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
+function fmtTweetDate(ts, iso) {
+  const d = ts ? new Date(ts * 1000) : (iso ? new Date(iso) : null);
+  if (!d || isNaN(d.getTime())) return '';
+  try { return d.toLocaleDateString('ca-ES', { day: 'numeric', month: 'short', year: 'numeric' }); }
+  catch (e) { return d.toISOString().slice(0, 10); }
+}
+function tweetBlock(l) {
+  const cs = l.code_stats;
+  if (!cs || typeof cs !== 'object' || cs.kind !== 'tweet') return '';
+  const a = cs.author || {};
+  const handle = a.screen_name ? '@' + esc(a.screen_name) : '';
+  const avatar = isHttpUrl(a.avatar_url)
+    ? `<img class="tw-av" src="${esc(a.avatar_url)}" alt="" loading="lazy" onerror="this.remove()">` : '';
+  const metrics = [
+    cs.replies ? `<span title="Respostes">💬 ${fmtNum(cs.replies)}</span>` : '',
+    cs.retweets ? `<span title="Retuits">🔁 ${fmtNum(cs.retweets)}</span>` : '',
+    cs.likes ? `<span title="M'agrada">♥ ${fmtNum(cs.likes)}</span>` : '',
+    cs.quotes ? `<span title="Cites">❝ ${fmtNum(cs.quotes)}</span>` : '',
+    cs.bookmarks ? `<span title="Desats">🔖 ${fmtNum(cs.bookmarks)}</span>` : '',
+    cs.views ? `<span title="Visualitzacions">👁 ${fmtNum(cs.views)}</span>` : '',
+    a.followers ? `<span title="Seguidors de l'autor">👥 ${fmtNum(a.followers)}</span>` : '',
+  ].filter(Boolean).join('');
+  const date = fmtTweetDate(cs.created_timestamp, cs.created_at);
+  const text = (cs.text || '').trim();
+  const authorHref = isHttpUrl(a.url) ? a.url : (isHttpUrl(l.url) ? l.url : '#');
+  return `<div class="tweetinfo">
+      ${avatar}
+      <div class="tw-body">
+        <div class="tw-head">
+          <a class="tw-author" href="${esc(authorHref)}" target="_blank" rel="noopener">${esc(a.name || handle || 'X')}</a>
+          ${handle ? `<span class="tw-handle">${handle}</span>` : ''}
+          ${date ? `<span class="tw-date" title="Data del tuit">📅 ${esc(date)}</span>` : ''}
+          ${cs.lang ? `<span class="tw-lang" title="Idioma original">${esc(cs.lang)}</span>` : ''}
+        </div>
+        ${metrics ? `<div class="tw-metrics">${metrics}</div>` : ''}
+        ${text ? `<details class="tw-text"><summary>Text original del tuit</summary><p>${esc(text)}</p>` +
+            `<a href="${esc(l.url)}" target="_blank" rel="noopener">Obre a X ↗</a></details>` : ''}
+      </div>
+    </div>`;
+}
+
 // Info del repositori o del vídeo (stats): es mostra dins "Detalls".
 function repoBlock(l) {
   const cs = l.code_stats;
@@ -1632,6 +1698,7 @@ function buildCard(l, single) {
         <div class="panel" data-panel="info"><p class="summary">${esc(summaryText(l.summary))}</p></div>
         <div class="panel" data-panel="deep" hidden>${deepPanel(l)}</div>
         <div class="panel" data-panel="details" hidden>
+          ${tweetBlock(l)}
           ${repoBlock(l)}
           <div class="tags">${tags}</div>
           <div class="meta">

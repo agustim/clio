@@ -40,7 +40,7 @@ $DB reindex                   # backfill d'embeddings dels links existents
 $DB serve                     # API + bot a http://127.0.0.1:8080
 ```
 
-Subcomandes: `serve`, `user-add`, `add`, `list`, `generate`, `reindex`, `reprocess`, `delete`, `push`, `npc-add`, `feed-add`, `feed-list`.
+Subcomandes: `serve`, `user-add`, `add`, `list`, `generate`, `reindex`, `reprocess`, `delete`, `push`, `npc-add`, `feed-add`, `feed-list`, `deep-backfill`.
 
 ## LLM (vLLM / OpenAI / Ollama)
 
@@ -80,6 +80,7 @@ Quan s'encua una URL es processa en **dues fases asíncrones**:
 2. **Deep** (2a passada, auto-encuada si aplica):
    - **Repos** (`github/gitlab/...`): `git clone --depth 1 --no-recurse-submodules` a un tmp, escaneig de codi (llenguatges, LOC, fitxers, README) → anàlisi tècnica LLM. `code_stats` (JSON) i `deep_summary` es desen. Tmp s'esborra sempre (RAII guard). Límits: `CLONE_TIMEOUT_SECS`, `CLONE_MAX_MB`.
    - **Articles/blogs/news**: re-fetch del text complet (no truncat) → resum llarg.
+   - **Tuits de X/Twitter**: la fitxa pública (fxtwitter) → autor, data, mètriques i media a `code_stats`, imatge d'acompanyament a `image_url`/`image_file`, i anàlisi en català a `deep_summary`. Vegeu [Tuits de X/Twitter](#tuits-de-xtwitter).
 
 Arquitectura: worker pool amb `tokio::mpsc` + `Semaphore(QUEUE_WORKERS)` ([src/queue.rs](src/queue.rs)). En arrencar `serve`, **recovery** re-encua la feina pendent/encallada de la DB (`status`/`deep_status` a pending/processing/failed). La CLI `add` processa inline (shallow+deep) per mostrar el resultat a l'instant.
 
@@ -105,6 +106,22 @@ coses:
 # Buit = desactivat (els 403 fallen directament).
 FLARESOLVERR_URL=http://flaresolverr:8191
 FLARESOLVERR_TIMEOUT_SECS=60
+```
+
+## Tuits de X/Twitter
+
+Els enllaços de `x.com` / `twitter.com` (incloent `mobile.` i les formes `i/status/…`, `/photo/N`, `/video/N`) no es poden llegir amb un GET (mur de login): es consulten a l'API pública de **fxtwitter**, sense token ni configuració.
+
+- **Shallow**: text del tuit i imatge d'acompanyament (primera foto o miniatura del vídeo/GIF); la imatge es baixa i es desa localment com la resta de links.
+- **Deep**: `code_stats` amb `kind:"tweet"` (autor + avatar + seguidors, data, likes/retuits/respostes/cites/desats/vistes, idioma, media i text original) i `deep_summary` amb l'anàlisi en català. La fitxa es desa **abans** de cridar l'LLM: si el model falla, la web ja mostra la informació del tuit i el deep es reintenta després.
+- **Web**: la card mostra la imatge i, al panell «📋 Detalls», el bloc del tuit (autor, data, mètriques, text original desplegable i enllaç «Obre a X»); el panell «🔬» porta l'anàlisi profunda.
+- Un tuit esborrat o protegit (404) no deixa la card en `failed`: es conserva el resum curt ja publicat.
+
+Backfill dels tuits recollits abans d'aquesta funció (els nous ja la fan sola):
+
+```bash
+linkanalyzer deep-backfill --limit 100   # fitxa + anàlisi profunda dels tuits pendents
+linkanalyzer generate                    # publica els canvis a ./public
 ```
 
 ## API REST (`/api/v1`)

@@ -44,6 +44,13 @@ pub enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// Backfill de l'anàlisi profunda dels tuits de X/Twitter que en manquin
+    /// (fitxa del twitt + resum en català). Els links nous ja la fan sola.
+    DeepBackfill {
+        /// Quants tuits comprovar com a màxim (els més recents primer).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
     /// Genera els MP3 de la veu dels titulars que en manquin (backfill de TTS).
     /// Requereix TTS_ENABLED=1 i el servei de veu Edge accessible. Els links
     /// analitzats des d'ara generen la veu automàticament.
@@ -211,6 +218,14 @@ pub async fn run(
                 "Imatges: {updated} og:image noves ({checked} sense imatge analitzades); \
                  {cached} còpies locals baixades ({cache_checked} comprovades). \
                  Els links analitzats des d'ara baixen la imatge automàticament."
+            );
+            Ok(())
+        }
+        Cmd::DeepBackfill { limit } => {
+            let (done, total) = state.backfill_deep(limit).await?;
+            println!(
+                "Anàlisi profunda de tuits: {done}/{total} fets. \
+                 Els tuits analitzats des d'ara la fan automàticament."
             );
             Ok(())
         }
