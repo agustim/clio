@@ -22,7 +22,13 @@ pub async fn process_deep(
     db.set_deep_status(link_id, crate::models::DeepStatus::Processing).await?;
 
     let result = match link.link_type {
-        LinkType::Repo => deep_repo(cfg, llm, &link.url).await,
+        LinkType::Repo => match forge_repo(&link.url) {
+            // Subpàgina (issue, PR, blob, tree, releases...): no és clonable.
+            Some(f) if !f.is_root => deep_repo_page(cfg, http, llm, &link.url, &f.root).await,
+            // Arrel (o URL d'un forge que no sabem descompondre): clone normal.
+            Some(f) => deep_repo(cfg, llm, &f.root).await,
+            None => deep_repo(cfg, llm, &link.url).await,
+        },
         LinkType::Article | LinkType::Blog | LinkType::News => {
             deep_article(cfg, http, llm, &link.url).await.map(|s| (s, None))
         }
@@ -55,16 +61,62 @@ pub async fn process_deep(
 
 // ---------- REPOS ----------
 
-/// Clona el repo (depth 1, sense submodules), escaneja el codi i en fa anàlisi.
-async fn deep_repo(
-    cfg: &Config,
-    llm: Option<&LlmClient>,
-    url: &str,
-) -> Result<(String, Option<Value>)> {
+/// Forges on una URL pot ser l'arrel d'un repositori clonable.
+const FORGES: &[&str] = &["github.com", "gitlab.com", "bitbucket.org"];
+
+/// URL d'un forge descomposta en arrel de repositori.
+struct ForgeRepo {
+    /// URL canònica de l'arrel (`https://github.com/owner/repo`), sense query
+    /// ni barra final: és el que `git clone` accepta.
+    root: String,
+    /// Cert si la URL rebuda ja era l'arrel (no una subpàgina).
+    is_root: bool,
+}
+
+/// Detecta si `url` és d'un forge conegut i en calcula l'arrel.
+///
+/// `git clone` només accepta l'arrel del repositori: amb
+/// `.../issues/123` o `.../blob/main/x.md` respon «repository not found».
+/// Retorna `None` si no és cap forge o si no té prou segments (`owner/repo`).
+///
+/// Nota: als grups niats de GitLab (`grup/subgrup/repo`) no es pot saber
+/// l'arrel sense l'API; s'agafen els dos primers segments i, si el clone
+/// falla, el deep de pàgina segueix funcionant igualment.
+fn forge_repo(url: &str) -> Option<ForgeRepo> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, tail) = rest.split_at(host_end);
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    let host = host.to_ascii_lowercase();
+    let host = host.trim_start_matches("www.");
+    if !FORGES.contains(&host) {
+        return None;
+    }
+    let path = tail.split(['?', '#']).next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.len() < 2 || segs[0] == "-" {
+        return None;
+    }
+    Some(ForgeRepo {
+        root: format!("{scheme}://{host}/{}/{}", segs[0], segs[1]),
+        is_root: segs.len() == 2,
+    })
+}
+
+/// Mètriques d'un repositori clonat.
+struct RepoInfo {
+    scan: CodeScan,
+    readme: Option<String>,
+    bytes: u64,
+}
+
+/// Clona `root` (blobless + sparse) i n'extreu les mètriques.
+async fn clone_info(cfg: &Config, root: &str) -> Result<RepoInfo> {
     let tmp = std::env::temp_dir().join(format!("clio-clone-{}", Uuid::new_v4()));
     let guard = TmpGuard(tmp.clone());
 
-    clone_repo(cfg, url, &tmp).await?;
+    clone_repo(cfg, root, &tmp).await?;
 
     // Límit de mida després del clone.
     let bytes = dir_size(&tmp).unwrap_or(0);
@@ -79,30 +131,176 @@ async fn deep_repo(
 
     let scan = scan_code(&tmp);
     let readme = read_readme(&tmp);
+    drop(guard); // esborra el tmp
+    Ok(RepoInfo { scan, readme, bytes })
+}
 
-    let stats = json!({
-        "files": scan.files,
-        "loc": scan.loc,
-        "bytes": bytes,
-        "languages": scan.languages_json(),
-        "top_languages": scan.top_languages(5),
-        "has_readme": readme.is_some(),
-    });
+fn repo_stats_json(info: &RepoInfo) -> Value {
+    json!({
+        "files": info.scan.files,
+        "loc": info.scan.loc,
+        "bytes": info.bytes,
+        "languages": info.scan.languages_json(),
+        "top_languages": info.scan.top_languages(5),
+        "has_readme": info.readme.is_some(),
+    })
+}
+
+/// Clona el repo (depth 1, sense submodules), escaneja el codi i en fa anàlisi.
+async fn deep_repo(
+    cfg: &Config,
+    llm: Option<&LlmClient>,
+    url: &str,
+) -> Result<(String, Option<Value>)> {
+    let info = clone_info(cfg, url).await?;
 
     let summary = match llm {
         Some(client) => {
-            let prompt = repo_prompt(url, &scan, readme.as_deref(), cfg.summary_max_words);
+            let prompt = repo_prompt(url, &info.scan, info.readme.as_deref(), cfg.summary_max_words);
             // Fallada del LLM => es propaga (el deep queda en 'failed', reintentable
             // amb «Refer») en lloc de publicar el README original, que podria ser
             // en un altre idioma. `complete` ja reintenta errors transitoris.
             let s = client.complete(&prompt).await?;
             pipeline::polish_summary(&s)
         }
-        None => repo_fallback(&scan, readme.as_deref()),
+        None => repo_fallback(&info.scan, info.readme.as_deref()),
     };
 
-    drop(guard); // esborra el tmp
-    Ok((summary, Some(stats)))
+    Ok((summary, Some(repo_stats_json(&info))))
+}
+
+/// Deep d'una URL que apunta a una **subpàgina** d'un repositori: issue, pull
+/// request, discussió, `blob/`, `tree/`, `releases/`, `commit/`, wiki...
+///
+/// Aquestes URL no són clonables, però el seu contingut sí que és a la pàgina
+/// HTML (GitHub/GitLab la renderitzen al servidor). Per tant la font principal
+/// és la pàgina; el clon de l'arrel és només un enriquiment (mètriques del
+/// projecte) i, si falla, no invalida el resum.
+async fn deep_repo_page(
+    cfg: &Config,
+    http: &reqwest::Client,
+    llm: Option<&LlmClient>,
+    page_url: &str,
+    root: &str,
+) -> Result<(String, Option<Value>)> {
+    let page = pipeline::fetch(http, cfg, page_url).await;
+    let parsed = match &page {
+        Ok(html) => Some(pipeline::parse(html)),
+        Err(e) => {
+            tracing::warn!(%page_url, error = %e, "deep repo page: pàgina no llegible");
+            None
+        }
+    };
+    let cloned = clone_info(cfg, root).await;
+    if let Err(e) = &cloned {
+        tracing::info!(%root, error = %e, "deep repo page: sense clon de l'arrel, seguim amb la pàgina");
+    }
+
+    // Sense pàgina i sense clon no hi ha res a analitzar: és una fallada real.
+    if parsed.is_none() && cloned.is_err() {
+        return Err(AppError::Pipeline(format!(
+            "ni pàgina ni repositori: {}",
+            page.err().map(|e| e.to_string()).unwrap_or_default()
+        )));
+    }
+
+    let title = parsed
+        .as_ref()
+        .and_then(|p| p.title.clone())
+        .unwrap_or_default();
+    let text: String = parsed
+        .as_ref()
+        .map(|p| p.text.chars().take(16000).collect())
+        .unwrap_or_default();
+
+    let summary = match llm {
+        Some(client) if !text.trim().is_empty() => {
+            let prompt = repo_page_prompt(
+                page_url,
+                root,
+                &title,
+                &text,
+                cloned.as_ref().ok(),
+                cfg.summary_max_words,
+            );
+            // Fallada del LLM => es propaga (deep 'failed', reintentable amb
+            // «Refer»), igual que a la resta de passades profundes.
+            let s = client.complete(&prompt).await?;
+            pipeline::polish_summary(&s)
+        }
+        _ if !text.trim().is_empty() => article_fallback(&text, cfg.summary_max_words),
+        // Sense text de pàgina però amb clon: resum del repositori sencer.
+        _ => match (&cloned, llm) {
+            (Ok(info), Some(client)) => {
+                let prompt = repo_prompt(root, &info.scan, info.readme.as_deref(), cfg.summary_max_words);
+                let s = client.complete(&prompt).await?;
+                pipeline::polish_summary(&s)
+            }
+            (Ok(info), None) => repo_fallback(&info.scan, info.readme.as_deref()),
+            _ => return Err(AppError::Pipeline("deep repo page: sense contingut".into())),
+        },
+    };
+
+    // Si el clon ha fallat no posem stats a zero: la fitxa de la web mostraria
+    // «0 fitxers / 0 LOC» per a una pàgina que sí que té contingut. Sense stats
+    // la fitxa simplement no surt i el resum de la pàgina es publica igualment.
+    let stats = cloned.as_ref().ok().map(|info| {
+        let mut stats = repo_stats_json(info);
+        if let Some(obj) = stats.as_object_mut() {
+            obj.insert("kind".into(), json!("repo_page"));
+            obj.insert("repo".into(), json!(root));
+            obj.insert("page_url".into(), json!(page_url));
+            obj.insert("page_available".into(), json!(parsed.is_some()));
+        }
+        stats
+    });
+    Ok((summary, stats))
+}
+
+/// Prompt per a una subpàgina de repositori: context del projecte + contingut.
+fn repo_page_prompt(
+    page_url: &str,
+    root: &str,
+    title: &str,
+    text: &str,
+    info: Option<&RepoInfo>,
+    max_words: usize,
+) -> String {
+    let ctx = match info {
+        Some(i) => {
+            let langs: Vec<String> = i
+                .scan
+                .top_languages(6)
+                .iter()
+                .filter_map(|v| {
+                    Some(format!(
+                        "{} ({} LOC)",
+                        v.get("lang")?.as_str()?,
+                        v.get("loc")?.as_u64()?
+                    ))
+                })
+                .collect();
+            format!(
+                "REPOSITORI: {root}\nFITXERS DE CODI: {}, LÍNIES TOTALS: {}, LLENGUATGES: {}",
+                i.scan.files,
+                i.scan.loc,
+                if langs.is_empty() { "desconeguts".to_string() } else { langs.join(", ") }
+            )
+        }
+        None => format!("REPOSITORI: {root}"),
+    };
+    format!(
+        "Ets un enginyer de programari. Aquesta URL és una pàgina DINS d'un repositori \
+         (issue, pull request, discussió, fitxer o release), no l'arrel del repositori.\n\
+         Escriu EN CATALÀ una anàlisi de menys de {max_words} paraules: de què tracta la \
+         pàgina, quin problema o canvi descriu i què en destaca. Si el text és d'un fitxer, \
+         explica'n el contingut.\n\
+         IMPORTANT: comença directament pel contingut — no obris amb «Aquesta pàgina...», \
+         «El repositori...» ni frases metalingüístiques similars — i sé fidel al text: no \
+         inventis fets, xifres ni característiques que no hi surtin.\n\n\
+         PÀGINA: {page_url}\n{ctx}\nTÍTOL: {title}\n\n\
+         CONTINGUT DE LA PÀGINA (retallat):\n{text}"
+    )
 }
 
 /// Globs de fitxers que ens interessen al checkout sparse (codi + readme).
@@ -840,5 +1038,80 @@ mod tests {
         assert_eq!(existing_tweet_summary(&link(Some("resum curt"))), "resum curt");
         assert_eq!(existing_tweet_summary(&link(Some("   "))), "(no aplica)");
         assert_eq!(existing_tweet_summary(&link(None)), "(no aplica)");
+    }
+
+    #[test]
+    fn forge_root_of_a_repo_root() {
+        let f = forge_repo("https://github.com/astral-sh/uv").unwrap();
+        assert!(f.is_root);
+        assert_eq!(f.root, "https://github.com/astral-sh/uv");
+    }
+
+    #[test]
+    fn forge_root_strips_query_and_trailing_slash() {
+        let f = forge_repo("https://github.com/astral-sh/uv/?tab=readme-ov-file").unwrap();
+        assert!(f.is_root);
+        assert_eq!(f.root, "https://github.com/astral-sh/uv");
+    }
+
+    #[test]
+    fn forge_root_of_subpages() {
+        // Les URL que abans es passaven a `git clone` i fallaven.
+        for (url, root) in [
+            ("https://github.com/astral-sh/uv/pull/21327", "https://github.com/astral-sh/uv"),
+            ("https://github.com/zedeus/nitter/issues/1442/", "https://github.com/zedeus/nitter"),
+            ("https://github.com/immich-app/immich/discussions/29439", "https://github.com/immich-app/immich"),
+            ("https://github.com/audacity/audacity/releases/tag/Audacity-4.0.0", "https://github.com/audacity/audacity"),
+            ("https://github.com/openai/math/blob/main/preprints/x/paper.pdf", "https://github.com/openai/math"),
+            ("https://github.com/humanlayer/x/tree/main/docs", "https://github.com/humanlayer/x"),
+        ] {
+            let f = forge_repo(url).unwrap();
+            assert!(!f.is_root, "{url} hauria de ser subpàgina");
+            assert_eq!(f.root, root);
+        }
+    }
+
+    #[test]
+    fn forge_root_gitlab_and_bitbucket() {
+        let g = forge_repo("https://gitlab.com/owner/repo/-/issues/7").unwrap();
+        assert!(!g.is_root);
+        assert_eq!(g.root, "https://gitlab.com/owner/repo");
+
+        let b = forge_repo("https://bitbucket.org/owner/repo/src/main/README.md").unwrap();
+        assert!(!b.is_root);
+        assert_eq!(b.root, "https://bitbucket.org/owner/repo");
+    }
+
+    #[test]
+    fn forge_root_normalizes_host_and_www() {
+        let f = forge_repo("HTTPS://WWW.GitHub.com/Owner/Repo").unwrap();
+        assert!(f.is_root);
+        assert_eq!(f.root, "https://github.com/Owner/Repo");
+    }
+
+    #[test]
+    fn forge_root_ignores_non_forges_and_short_paths() {
+        // "github.com" dins d'una URL de web.archive.org no és un repo.
+        assert!(forge_repo("https://web.archive.org/web/2026/https://github.com/x/y").is_none());
+        assert!(forge_repo("https://github.com/owner").is_none());
+        assert!(forge_repo("https://example.com/owner/repo/issues/1").is_none());
+    }
+
+    #[test]
+    fn repo_page_prompt_marks_it_as_a_subpage_and_is_faithful() {
+        let p = repo_page_prompt(
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r",
+            "Fix the parser",
+            "text de la pàgina",
+            None,
+            400,
+        );
+        assert!(p.contains("EN CATALÀ"));
+        assert!(p.contains("DINS d'un repositori"));
+        assert!(p.contains("Fix the parser"));
+        assert!(p.contains("text de la pàgina"));
+        assert!(p.contains("no inventis"));
+        assert!(p.contains("400"));
     }
 }
