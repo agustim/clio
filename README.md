@@ -16,6 +16,7 @@ Implementació de [definition.md](definition.md). Abast actual: API + CLI + pipe
 | Cua de workers | [src/queue.rs](src/queue.rs) |
 | 2a passada (deep) | [src/deep.rs](src/deep.rs) |
 | Client LLM (OpenAI-compat) | [src/llm.rs](src/llm.rs) |
+| Watchdog del model (avisos Telegram) | [src/watchdog.rs](src/watchdog.rs) |
 | Embeddings (local/HTTP) | [src/embed.rs](src/embed.rs) |
 | Extractors xarxes socials | [src/social.rs](src/social.rs) |
 | Col·lectors NPC (RSS) | [src/feeds.rs](src/feeds.rs) |
@@ -139,9 +140,13 @@ Auth: `Authorization: Bearer <api_token>`.
 
 Si `TELEGRAM_BOT_TOKEN` està definit, `serve` arrenca el bot. Accepta links d'usuaris amb `telegram_id` a la fitxa i respon "Processant url." en encuar-los. `ADMIN_CHAT_ID` rep avisos d'admin (arrencada + errors d'anàlisi); buit = cap avís. L'id numèric el dóna `@userinfobot` (grups: id negatiu).
 
+El **watchdog del model** ([src/watchdog.rs](src/watchdog.rs)) sondeja l'endpoint del LLM cada `LLM_WATCH_SECS` (per defecte 60 s) amb una completació curta. Si falla `LLM_WATCH_FAILS` cops seguits (per defecte 3), envia **un sol** missatge a `ADMIN_CHAT_ID` dient que no pot accedir al model; quan torna a respondre, n'envia **un altre** amb la durada de la caiguda. Així t'assabentes d'una caiguda encara que no arribin links, sense dependre del circuit breaker (que només s'obre després de vuit fallades reals). `LLM_WATCH_SECS=0` el desactiva.
+
 ```env
 TELEGRAM_BOT_TOKEN=
 ADMIN_CHAT_ID=
+LLM_WATCH_SECS=60
+LLM_WATCH_FAILS=3
 ```
 
 ## Col·lectors NPC (RSS)

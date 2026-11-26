@@ -505,6 +505,11 @@ async fn serve(state: AppState, rx: tokio::sync::mpsc::Receiver<crate::queue::Jo
         }
     });
 
+    // Watchdog del model: sondeja el LLM i avisa per Telegram quan cau i quan
+    // torna (un sol missatge per transició). Independent del trànsit de links.
+    let watchdog_state = state.clone();
+    tokio::spawn(async move { crate::watchdog::run(watchdog_state).await });
+
     // Bot en background (stub).
     let bot_state = state.clone();
     tokio::spawn(async move { telegram::run(bot_state).await });

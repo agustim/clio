@@ -17,6 +17,7 @@ mod service;
 mod social;
 mod telegram;
 mod voice;
+mod watchdog;
 mod webgen;
 
 use clap::Parser;

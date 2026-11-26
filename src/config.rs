@@ -141,6 +141,13 @@ pub struct Config {
     pub llm_retry_interval_secs: u64,
     /// Màxim de links fallits que es re-encuen a cada passada del reaper.
     pub llm_retry_batch: i64,
+    /// Watchdog del model: cada quants segons es fa una sonda lleugera a
+    /// l'endpoint del LLM per detectar caigudes (0 = desactivat). Els avisos
+    /// de pujada/baixada van per Telegram (un sol missatge per transició).
+    pub llm_watch_secs: u64,
+    /// Fallades seguides de la sonda abans d'avisar que el model no respon.
+    /// Evita falsos positius per pics puntuals de càrrega.
+    pub llm_watch_fails: u32,
     /// Interval (segons) de regeneració de la web durant `serve`. 0 = desactivat.
     pub web_regen_secs: u64,
     /// Finestra (segons) per agrupar una ràfega de links nous en un sol
@@ -208,6 +215,12 @@ impl Config {
         let llm_retry_batch: i64 = get("LLM_RETRY_BATCH", "25")
             .parse()
             .map_err(|_| AppError::Config("LLM_RETRY_BATCH invalid".into()))?;
+        let llm_watch_secs: u64 = get("LLM_WATCH_SECS", "60")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_WATCH_SECS invalid".into()))?;
+        let llm_watch_fails: u32 = get("LLM_WATCH_FAILS", "3")
+            .parse()
+            .map_err(|_| AppError::Config("LLM_WATCH_FAILS invalid".into()))?;
         let web_regen_secs: u64 = get("WEB_REGEN_SECS", "30")
             .parse()
             .map_err(|_| AppError::Config("WEB_REGEN_SECS invalid".into()))?;
@@ -349,6 +362,8 @@ impl Config {
             queue_workers,
             llm_retry_interval_secs,
             llm_retry_batch,
+            llm_watch_secs,
+            llm_watch_fails,
             web_regen_secs,
             web_debounce_secs,
             clone_timeout_secs,

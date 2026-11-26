@@ -13,6 +13,10 @@ const LLM_RETRIES: usize = 2;
 /// Backoff exponencial base per als reintents (500ms · 2^n). Juntament amb el
 /// circuit breaker i el rate limiter evita martellejar un endpoint caigut.
 const LLM_RETRY_BASE_MS: u64 = 500;
+/// Timeout (segons) de la sonda del watchdog. És més llarg que el d'una crida
+/// normal perquè un model ocupat (cua al proxy) no sembli caigut; si l'endpoint
+/// és mort, la connexió falla igualment de seguida.
+const PROBE_TIMEOUT_SECS: u64 = 60;
 
 /// Client OpenAI-compatible (vLLM / OpenAI / Ollama-openai).
 ///
@@ -232,6 +236,58 @@ impl LlmClient {
             } else {
                 None
             },
+        }
+    }
+
+    /// Sonda lleugera per al watchdog: `Ok(())` només si el model respon amb
+    /// contingut utilitzable.
+    ///
+    /// És **diagnòstica**: no toca el circuit breaker ni el rate limiter, de
+    /// manera que sondejar cada minut no altera l'estat que governa les crides
+    /// reals ni les notificacions de la cua.
+    pub async fn probe(&self) -> std::result::Result<(), String> {
+        let url = format!(
+            "{}/chat/completions",
+            self.cfg.base_url.trim_end_matches('/')
+        );
+        let req = ChatReq {
+            model: &self.cfg.model,
+            messages: vec![Msg {
+                role: "user",
+                content: "Respon només amb la paraula: ok",
+            }],
+            temperature: 0.0,
+        };
+        let mut rb = self
+            .http
+            .post(&url)
+            .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+            .json(&req);
+        if let Some(key) = &self.cfg.api_key {
+            rb = rb.bearer_auth(key);
+        }
+        let resp = rb.send().await.map_err(|e| format!("connexió: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let body: String = body.trim().chars().take(200).collect();
+            return Err(format!("HTTP {status}: {body}"));
+        }
+        let body: ChatResp = resp
+            .json()
+            .await
+            .map_err(|e| format!("resposta no desxifrable: {e}"))?;
+        let has_text = body
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.text().map(str::to_owned))
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+        if has_text {
+            Ok(())
+        } else {
+            Err("resposta buida del model".into())
         }
     }
 
