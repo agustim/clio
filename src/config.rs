@@ -307,7 +307,7 @@ impl Config {
         let tts_kbps: u32 = get("TTS_KBPS", "48")
             .parse()
             .map_err(|_| AppError::Config("TTS_KBPS invalid".into()))?;
-        let tts_timeout_secs: u64 = get("TTS_TIMEOUT_SECS", "20")
+        let tts_timeout_secs: u64 = get("TTS_TIMEOUT_SECS", "60")
             .parse()
             .map_err(|_| AppError::Config("TTS_TIMEOUT_SECS invalid".into()))?;
         let tts_only_news = get("TTS_ONLY_NEWS", "1") != "0";

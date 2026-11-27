@@ -285,9 +285,12 @@ i phase-vocoder fets amb FFT a `voice/src/audio/`).
   `serve` el copia a `PUBLIC_DIR/music.mp3` si no n'hi cap. Per canviar-la, substituïu
   `public/music.mp3` (o `assets/music.mp3`) per qualsevol MP3 lliure de drets.
 - El toc del directe és **configurable**: `TTS_VOICE` (`ca-ES-JoanaNeural`,
-  `ca-ES-AlbaNeural`), `TTS_RATE_FACTOR`, `TTS_TEMPO`, `TTS_TARGET_RATE`, `TTS_KBPS`,
+  `ca-ES-EnricNeural`), `TTS_RATE_FACTOR`, `TTS_TEMPO`, `TTS_TARGET_RATE`, `TTS_KBPS`,
   `TTS_TIMEOUT_SECS`, `TTS_SCRIPT_WORDS` (llargada del resum parlat, 20-80; per defecte 45)
   i `TTS_MIN_GAP_MS` (espaiat mínim entre síntesis; per defecte 5000 ms).
+  La síntesi d'un resum de 40-50 paraules triga **~20-30 s** al servei d'Edge:
+  `TTS_TIMEOUT_SECS` per defecte és **60** (no el baixis de 30 o tornaran els
+  timeouts i les notícies quedaran sense veu).
 - **Robustesa d'Edge**: el servei tanca connexions (close 1006) si se'n fan diverses
   seguides des de la mateixa IP, i rebutja una veu `ca-ES` si l'SSML porta una altra
   llengua. Clio serialitza les síntesis amb `TTS_MIN_GAP_MS` i reintenta fins a 3 cops;
