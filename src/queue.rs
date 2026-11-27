@@ -1,11 +1,12 @@
 use crate::deep;
 use crate::pipeline;
 use crate::service::AppState;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
     /// Primera passada: fetch + parse + classify + analyze.
     Shallow,
@@ -20,20 +21,50 @@ pub struct Job {
 }
 
 /// Handle clonable per encuar feina.
+///
+/// Porta un conjunt de jobs «en vol» (encuats o en curs). Sense això el reaper
+/// podia encuar el mateix link una vegada per minut mentre la cua anava
+/// endarrerida: el link seguia `failed` a la BD (encara no s'havia processat),
+/// el reaper el tornava a triar i la cua creixia sense parar. Amb el clon de
+/// repos (30-120 s) això va arribar a omplir la cua de 1024 i va deixar les
+/// notícies noves al darrere, sense analitzar.
 #[derive(Clone)]
 pub struct Queue {
     tx: mpsc::Sender<Job>,
+    in_flight: Arc<Mutex<HashSet<(Uuid, Stage)>>>,
 }
 
 impl Queue {
+    /// Encola el job si no hi és ja (mateix link i mateixa etapa).
     pub fn enqueue(&self, job: Job) {
-        // try_send no bloqueja; si la cua és plena, ho fem en una task.
-        if let Err(mpsc::error::TrySendError::Full(job)) = self.tx.try_send(job) {
-            let tx = self.tx.clone();
-            tokio::spawn(async move {
-                let _ = tx.send(job).await;
-            });
+        if !self.claim(job) {
+            return;
         }
+        match self.tx.try_send(job) {
+            Ok(()) => {}
+            // Cua plena: s'encua en una task per no bloquejar el cridaner.
+            Err(mpsc::error::TrySendError::Full(job)) => {
+                let tx = self.tx.clone();
+                let in_flight = self.in_flight.clone();
+                tokio::spawn(async move {
+                    if tx.send(job).await.is_err() {
+                        release(&in_flight, job);
+                    }
+                });
+            }
+            // Cua tancada (dispatcher aturat): no deixem el job «en vol».
+            Err(mpsc::error::TrySendError::Closed(job)) => release(&self.in_flight, job),
+        }
+    }
+
+    /// Marca el job com a acabat: el reaper ja el pot tornar a encuar.
+    pub fn done(&self, job: Job) {
+        release(&self.in_flight, job);
+    }
+
+    fn claim(&self, job: Job) -> bool {
+        let mut set = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        set.insert((job.link_id, job.stage))
     }
 
     pub fn shallow(&self, link_id: Uuid) {
@@ -44,11 +75,22 @@ impl Queue {
     }
 }
 
+fn release(in_flight: &Arc<Mutex<HashSet<(Uuid, Stage)>>>, job: Job) {
+    in_flight
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(job.link_id, job.stage));
+}
+
 /// Crea la cua. Retorna el handle (va dins de l'AppState) i el Receiver
 /// que consumirà el dispatcher (`run`).
 pub fn start() -> (Queue, mpsc::Receiver<Job>) {
     let (tx, rx) = mpsc::channel::<Job>(1024);
-    (Queue { tx }, rx)
+    let queue = Queue {
+        tx,
+        in_flight: Arc::new(Mutex::new(HashSet::new())),
+    };
+    (queue, rx)
 }
 
 /// Bucle dispatcher: limita la concurrència amb un semàfor i fa spawn per job.
@@ -61,6 +103,7 @@ pub async fn run(state: AppState, mut rx: mpsc::Receiver<Job>, workers: usize) {
         let st = state.clone();
         tokio::spawn(async move {
             handle(&st, job).await;
+            st.queue.done(job);
             drop(permit);
         });
     }
@@ -172,5 +215,38 @@ async fn handle(state: &AppState, job: Job) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedups_queued_jobs_until_done() {
+        let (q, mut rx) = start();
+        let id = Uuid::new_v4();
+        let job = Job { link_id: id, stage: Stage::Shallow };
+
+        // El mateix job dues vegades: només hi entra un cop.
+        q.enqueue(job);
+        q.enqueue(job);
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err(), "el job duplicat no s'havia de encuar");
+
+        // Un cop acabat, el reaper el pot tornar a encuar.
+        q.done(job);
+        q.enqueue(job);
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn shallow_and_deep_are_independent() {
+        let (q, mut rx) = start();
+        let id = Uuid::new_v4();
+        q.shallow(id);
+        q.deep(id);
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
     }
 }

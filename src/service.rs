@@ -207,6 +207,12 @@ impl AppState {
             n += 1;
         }
         for id in &deep {
+            // Marca'l com a pendent ABANS d'encuar-lo: mentre el job espera a la
+            // cua no ha de tornar a sortir a `oldest_failed_deep_ids` (si no, el
+            // reaper el re-encua cada minut i la cua creix tota sola).
+            if let Err(e) = self.db.set_deep_status(*id, DeepStatus::Pending).await {
+                tracing::warn!(link_id = %id, error = %e, "reaper: no s'ha pogut marcar el deep com a pendent");
+            }
             self.queue.deep(*id);
             n += 1;
         }

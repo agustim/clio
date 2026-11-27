@@ -19,6 +19,15 @@ pub async fn process_deep(
     link_id: Uuid,
 ) -> Result<()> {
     let link = db.link_by_id(link_id).await?.ok_or(AppError::NotFound)?;
+    // Job duplicat (reaper + cua endarrerida) o reprocessament concurrent: si
+    // ja hi ha anàlisi feta no tornem a clonar el repo, que pot trigar minuts i
+    // bloqueja un dels quatre workers. `process_full`/`retry_link` posen
+    // l'estat a `pending` abans de cridar-nos, així que això no impedeix
+    // refer l'anàlisi a propòsit.
+    if link.deep_status == crate::models::DeepStatus::Done {
+        tracing::debug!(%link_id, "deep ja fet, s'omet");
+        return Ok(());
+    }
     db.set_deep_status(link_id, crate::models::DeepStatus::Processing).await?;
 
     let result = match link.link_type {
