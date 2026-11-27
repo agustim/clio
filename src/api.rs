@@ -422,9 +422,9 @@ async fn img_local(
         .into_response())
 }
 
-/// Serveix el MP3 de la veu d'un titular (/audio/{id}), desat a TTS_DIR mentre
-/// s'analitzava la cua. L'overlay el llegeix dins del grup de cards. Si no n'hi
-/// ha, 404 → la card simplement no es llegeix en veu alta.
+/// Serveix el MP3 de la veu d'una notícia (/audio/{id}): titular + resum
+/// parlat, desat a TTS_DIR en acabar l'anàlisi profunda. L'overlay el llegeix
+/// dins del grup de cards; si no n'hi ha, 404 → la card no es llegeix en veu alta.
 async fn audio_local(
     State(state): State<AppState>,
     Path(id): Path<String>,

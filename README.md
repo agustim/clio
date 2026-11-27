@@ -227,9 +227,11 @@ inferior** amb el *news crawl* de titulars.
 - `/img?u=...` — proxy d'imatges remot (anti-hotlink, amaga el referrer, guardes SSRF).
 
 Comportament de l'escena: la graella mostra `OVERLAY_CARDS` cards i **salta de CARDS en
-CARDS** a cada canvi (`OVERLAY_ROTATE_SECS`) — totes canvien a l'hora —; cada card mostra
-fins a `OVERLAY_TEXT_LINES` línies (per defecte 9) de l'anàlisi del LLM, donant
-prioritat al text i limitant l'alçada de la imatge (`height: clamp(110px, 17vh, 180px)`).
+CARDS** a cada canvi — totes canvien a l'hora —; cada card mostra fins a `OVERLAY_TEXT_LINES`
+línies (per defecte 9) de l'anàlisi del LLM, donant prioritat al text i limitant l'alçada de
+la imatge (`height: clamp(110px, 17vh, 180px)`). Amb la veu activa, la graella **no canvia
+mentre es llegeix el grup** i avança en acabar; `OVERLAY_ROTATE_SECS` és el temps mínim que
+es veu un grup (sense veu, la rotació és per temps).
 
 Les **hores/data de les notícies i el rellotge** es mostren a la **TimeZone configurable**
 `OVERLAY_TIMEZONE` (IANA, p.ex. `Europe/Andorra`); si va buida s'usa l'hora local del
@@ -252,21 +254,29 @@ linkanalyzer images --limit 200   # 1) extreu og:image pels que en manquin; 2) b
 > la card) i, si no n'hi ha, placeholder del tema. Si vols imatges lliures de risc, pots
 > canviar el fallback a Wikimedia/Openverse (vegeu `src/overlay.rs`).
 
-### Veu dels titulars i música de fons (TTS en català)
+### Veu de les notícies i música de fons (TTS en català)
 
-Amb `TTS_ENABLED=1`, en analitzar la cua cada titular **noticiós** (News/Article/Blog/Vídeo;
-`TTS_ONLY_NEWS=0` per a tots) genera un **MP3 que el llegeix en català**: la sintesi es fa amb
-les veus Edge "Read Aloud" (protocol websocket + token DRM, port pur Rust) i s'hi aplica la
-mateixa transformació del projecte Node `voice-convert` **sense cap dependència de ffmpeg**
+Amb `TTS_ENABLED=1`, en **acabar l'anàlisi profunda** (el moment en què la notícia pot
+aparèixer a l'overlay) cada notícia **noticiosa** (News/Article/Blog/Vídeo;
+`TTS_ONLY_NEWS=0` per a tots) genera un **MP3 que llegeix el titular i, tot seguit, un resum
+de 40-50 paraules** (`TTS_SCRIPT_WORDS`) que fa entendre la notícia. El resum l'escriu el LLM
+a partir de `deep_summary` amb una crida curta addicional; si el model falla o la resposta no
+té la llargada demanada, es fa una **extracció automàtica** de les primeres frases. El text
+parlat es desa a `links.audio_script` (així el backfill no repeteix el LLM) i el MP3 a
+`TTS_DIR` (per defecte `data/tts/<link_id>.mp3`). La sintesi fa servir les veus Edge
+"Read Aloud" (protocol websocket + token DRM, port pur Rust) amb la mateixa transformació del
+projecte Node `voice-convert` **sense cap dependència de ffmpeg**
 (`asetrate<rate_factor>` + `atempo<tempo>` → to ×0.75 i dura la meitat, amb resample lineal
-i phase-vocoder fets amb FFT a `voice/src/audio/`). El MP3 es desa a `TTS_DIR` (per defecte
-`data/tts/<link_id>.mp3`).
+i phase-vocoder fets amb FFT a `voice/src/audio/`).
 
-- `/audio/{id}` — serveix el MP3 de la veu d'un titular (o 404 si no en té).
-- L'escena **llegeix en veu alta els titulars del grup de cards visible** a cada rotació
-  (primera càrrega inclosa), un darrere l'altre amb la pausa `OVERLAY_READ_GAP_MS`; els que
-  encara no tenen MP3 es salten i es tornen a provar poc després (la veu es genera mentre
-  s'analitza la cua).
+- `/audio/{id}` — serveix el MP3 de la veu d'una notícia (o 404 si no en té). La URL del
+  ticker porta `?v=<updated_at>` perquè, si la veu es regenera, el navegador no serveixi
+  l'MP3 vell.
+- L'escena **llegeix en veu alta el grup de cards visible** (primera càrrega inclosa), un
+  darrere l'altre amb la pausa `OVERLAY_READ_GAP_MS`; les que encara no tenen MP3 es salten.
+- La **rotació s'ajusta a la veu**: la graella no canvia mentre es llegeix un grup i avança
+  quan la lectura acaba. `OVERLAY_ROTATE_SECS` passa a ser el **temps mínim** que es veu un
+  grup; sense veu (TTS desactivat o cap MP3) la rotació és per temps, com sempre.
 - **Música de fons**: un MP3 lliure de drets a `PUBLIC_DIR/music.mp3`; l'escena el
   reprodueix en bucle a `OVERLAY_MUSIC_VOLUME` (per defecte 0.22) i **baixa el volum a
   `OVERLAY_MUSIC_DUCK` (per defecte 0.07) mentre es llegeixen els titulars** (ducking suau).
@@ -276,14 +286,25 @@ i phase-vocoder fets amb FFT a `voice/src/audio/`). El MP3 es desa a `TTS_DIR` (
   `public/music.mp3` (o `assets/music.mp3`) per qualsevol MP3 lliure de drets.
 - El toc del directe és **configurable**: `TTS_VOICE` (`ca-ES-JoanaNeural`,
   `ca-ES-AlbaNeural`), `TTS_RATE_FACTOR`, `TTS_TEMPO`, `TTS_TARGET_RATE`, `TTS_KBPS`,
-  `TTS_TIMEOUT_SECS`.
+  `TTS_TIMEOUT_SECS`, `TTS_SCRIPT_WORDS` (llargada del resum parlat, 20-80; per defecte 45)
+  i `TTS_MIN_GAP_MS` (espaiat mínim entre síntesis; per defecte 5000 ms).
+- **Robustesa d'Edge**: el servei tanca connexions (close 1006) si se'n fan diverses
+  seguides des de la mateixa IP, i rebutja una veu `ca-ES` si l'SSML porta una altra
+  llengua. Clio serialitza les síntesis amb `TTS_MIN_GAP_MS` i reintenta fins a 3 cops;
+  l'SSML fa servir sempre la llengua de la veu (`TTS_LANG`).
 
 Backfill per als links ja processats (sense re-analitzar res):
 
 ```bash
-linkanalyzer voice --limit 200    # genera els MP3 que en manquin
+linkanalyzer voice --limit 200    # genera/actualitza els MP3 (deep fet; també veus antigues)
 linkanalyzer say "Bon dia, això és una prova" --out proba.mp3   # prova ràpida de veu
 ```
+
+> El backfill només mira notícies amb anàlisi profunda (les úniques que poden sortir a
+> l'overlay). Genera les que no tenen veu i **actualitza les veus antigues** (MP3 sense
+> `audio_script`, que només llegien el titular). Fa una crida curta al LLM per link sense
+> `audio_script`; per a volums grans, comença amb un `--limit` petit: els textos generats es
+> queden a la BD i un reintent només sintetitza l'àudio.
 
 > La veu i la música de l'escena poden sonar directament a l'emissió headless: `stream.sh`
 > arranca PulseAudio (sink nul `clio_out`), el Chromium hi envia el so de l'overlay

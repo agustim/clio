@@ -121,11 +121,16 @@ pub struct Link {
     /// l'overlay la serveix des de /imgout/{id} en lloc del proxy remot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_file: Option<String>,
-    /// MP3 de la veu del titular (TTS), dins de TTS_DIR (p.ex.
-    /// `data/tts/<link_id>.mp3`), servit a /audio/{id}. L'overlay el llegeix
-    /// en directe. Buit = sense veu per a aquesta notícia.
+    /// MP3 de la veu de la notícia (titular + resum parlat, TTS), dins de
+    /// TTS_DIR (p.ex. `data/tts/<link_id>.mp3`), servit a /audio/{id}.
+    /// L'overlay el llegeix en directe. Buit = sense veu per a aquesta notícia.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_file: Option<String>,
+    /// Text parlat de la notícia (titular + resum de 40-50 paraules) generat
+    /// en acabar l'anàlisi profunda. És el que sintetitza el TTS: es desa
+    /// encara que la sintesi falli, perquè el backfill no repeteixi el LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_script: Option<String>,
     /// Embedding quantitzat (int8) per al ranking personalitzat a la web.
     /// `e` = vector i8; `s` = factor de dequantització (f32 ≈ e[i] * s).
     #[serde(rename = "e", default, skip_serializing_if = "Option::is_none")]
@@ -172,8 +177,8 @@ pub struct Report {
 #[derive(Debug, Clone)]
 pub struct Analysis {
     /// Titular complet (en català) generat pel LLM; None => s'usa el títol de
-    /// la pàgina. No es retalla: el mateix text és el que llegeix en veu alta
-    /// la veu TTS (/audio/{id}).
+    /// la pàgina. No es retalla: és el titular que la veu llegeix abans del
+    /// resum parlat (/audio/{id}).
     pub title: Option<String>,
     pub summary: String,
     pub tags: Vec<String>,
@@ -203,6 +208,7 @@ mod tests {
             image_url: None,
             image_file: None,
             audio_file: None,
+            audio_script: None,
             embedding: None,
             embed_scale: None,
             created_at: now,

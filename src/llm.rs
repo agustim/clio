@@ -161,6 +161,13 @@ impl LlmClient {
             .ok_or_else(|| AppError::Llm("llm: empty choices".into()))
     }
 
+    /// Resum parlat per a la veu de l'overlay: un paràgraf de ~`words` paraules
+    /// que expliqui la notícia (el titular ja es llegeix a part). Best-effort:
+    /// els errors els tracta el cridaner (cau a l'extracció automàtica).
+    pub async fn brief(&self, title: Option<&str>, text: &str, words: usize) -> Result<String> {
+        self.complete(&brief_prompt(title, text, words)).await
+    }
+
     /// Comprovació ràpida a l'arrencada: confirma que el model respon i amb
     /// quina forma (`content` vs `reasoning_content`) per saber com treballar-hi.
     /// És diagnòstic: NO toca el circuit breaker ni el rate limiter.
@@ -544,6 +551,28 @@ pub struct ModelHealth {
     pub error: Option<String>,
 }
 
+/// Prompt del resum parlat (veu de l'overlay): un paràgraf de ~`words` paraules
+/// en català, fidel al text i sense cap etiqueta ni markdown. El titular es
+/// llegeix a part, així que el paràgraf no l'ha de repetir.
+fn brief_prompt(title: Option<&str>, text: &str, words: usize) -> String {
+    let text: String = text.chars().take(4000).collect();
+    let min = words.saturating_sub(5);
+    let max = words + 5;
+    let title = title.map(str::trim).filter(|t| !t.is_empty()).unwrap_or("");
+    format!(
+        "Ets el redactor d'un informatiu de ràdio en CATALÀ. Escriu UN sol paràgraf de {words} \
+         paraules (entre {min} i {max}) que expliqui la notícia de manera que qui només \
+         l'escolti l'entengui: què ha passat, qui hi intervé i per què és important.\n\
+         - Comença directament pel fet, sense fórmules com «L'article...», «Aquest text...» \
+         ni «En aquesta notícia...».\n\
+         - No repeteixis el titular literalment ni facis servir etiquetes («Titular», «Resum»).\n\
+         - Prosa plana: sense markdown, sense llistes, sense cometes i sense salts de línia.\n\
+         - Sé fidel al text: no afegeixis fets, xifres, noms ni opinions que no hi surtin.\n\
+         Respon NOMÉS amb el paràgraf, sense cap etiqueta.\n\n\
+         TITULAR: {title}\n\nTEXT:\n{text}"
+    )
+}
+
 /// Treu el primer bloc {...} d'una resposta (per si el model afegeix text al voltant).
 fn extract_json(s: &str) -> Option<&str> {
     let start = s.find('{')?;
@@ -584,5 +613,29 @@ mod tests {
         // content buit i reasoning buit => None.
         let m: RespMsg = serde_json::from_str(r#"{"role":"assistant"}"#).unwrap();
         assert_eq!(m.text(), None);
+    }
+
+    /// El prompt del resum parlat ha de demanar català, 40-50 paraules per al
+    /// valor 45 i cap etiqueta/markdown (és text per a la veu, no per a la web).
+    #[test]
+    fn brief_prompt_is_catalan_short_and_plain() {
+        let p = brief_prompt(Some("Titular de prova"), "Text de la notícia.", 45);
+        assert!(p.contains("CATALÀ"), "demana explícitament el català");
+        assert!(p.contains("UN sol paràgraf de 45 paraules"),
+                "fixa l'objectiu de paraules: {p}");
+        assert!(p.contains("entre 40 i 50"), "dóna un marge de ±5 paraules");
+        assert!(p.contains("sense markdown") && p.contains("sense cometes"),
+                "prosa plana per a la veu");
+        assert!(p.contains("Titular de prova") && p.contains("Text de la notícia."),
+                "inclou titular i contingut");
+        assert!(p.contains("No repeteixis el titular literalment"),
+                "el titular ja es llegeix a part");
+        // Sense titular l'etiqueta queda buida (no s'inventa cap títol).
+        let p = brief_prompt(None, "Només text.", 45);
+        assert!(p.contains("TITULAR: \n"), "l'etiqueta queda buida si no hi ha titular");
+        // El text es retalla a 4000 caràcters (entrada acotada).
+        let llarg = "a".repeat(5000);
+        let p = brief_prompt(None, &llarg, 45);
+        assert!(!p.contains(&"a".repeat(4001)), "el text d'entrada es retalla");
     }
 }

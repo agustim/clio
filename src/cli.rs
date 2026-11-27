@@ -51,7 +51,8 @@ pub enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
-    /// Genera els MP3 de la veu dels titulars que en manquin (backfill de TTS).
+    /// Genera els MP3 de la veu (titular + resum de 40-50 paraules) de les
+    /// notícies amb anàlisi profunda que en manquin (backfill de TTS).
     /// Requereix TTS_ENABLED=1 i el servei de veu Edge accessible. Els links
     /// analitzats des d'ara generen la veu automàticament.
     Voice {
@@ -234,10 +235,11 @@ pub async fn run(
                 println!("TTS no activat (TTS_ENABLED=1). Res a fer.");
                 return Ok(());
             }
-            let (generated, checked) = crate::voice::backfill(&state.db, &state.cfg, limit).await?;
+            let (generated, checked) =
+                crate::voice::backfill(&state.db, &state.cfg, state.llm.as_deref(), limit).await?;
             println!(
-                "Veu: {generated} MP3 nous generats ({checked} links sense veu comprovats). \
-                 Els analitzats des d'ara generen la veu automàticament."
+                "Veu: {generated} MP3 generats/actualitzats ({checked} notícies amb anàlisi \
+                 profunda pendents de veu). Els analitzats des d'ara generen la veu automàticament."
             );
             Ok(())
         }

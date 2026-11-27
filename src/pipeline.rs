@@ -536,9 +536,9 @@ pub async fn process_link(
                     tracing::warn!(%link_id, error = %e, "no s'ha pogut desar la imatge localment (es farà servir el proxy /img)");
                 }
             }
-            // Veu del titular (best-effort): genera el MP3 que llegirà l'overlay
-            // del directe. Si falla, la notícia simplement no té veu.
-            crate::voice::maybe_generate(db, cfg, link_id, title.as_deref(), link_type).await;
+            // La veu de la notícia (titular + resum parlat) es genera al final
+            // de l'anàlisi profunda, que és quan la card pot sortir a l'overlay
+            // (vegeu `deep::process_deep` i `voice::prepare`).
             // Embedding semàntic per al ranking personalitzat (best-effort).
             if let Some(emb) = embedder {
                 let text = embed_source(title.as_deref(), &analysis);

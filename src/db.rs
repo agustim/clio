@@ -69,6 +69,10 @@ impl Db {
             ("009_overlay", include_str!("../migrations/009_overlay.sql")),
             ("010_image_file", include_str!("../migrations/010_image_file.sql")),
             ("011_audio", include_str!("../migrations/011_audio.sql")),
+            (
+                "012_audio_script",
+                include_str!("../migrations/012_audio_script.sql"),
+            ),
         ];
 
         for (name, sql) in migrations {
@@ -491,6 +495,7 @@ impl Db {
             image_url: r.get("image_url"),
             image_file: r.get("image_file"),
             audio_file: r.get("audio_file"),
+            audio_script: r.get("audio_script"),
             embedding,
             embed_scale,
             created_at: parse_ts(r.get::<String, _>("created_at").as_str()),
@@ -498,7 +503,7 @@ impl Db {
         })
     }
 
-    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, image_file, audio_file, embedding, embed_scale, created_at, updated_at";
+    const LINK_COLS: &'static str = "id, url, title, summary, link_type, tags, sentiment, status, co_reporters, deep_status, deep_summary, code_stats, image_url, image_file, audio_file, audio_script, embedding, embed_scale, created_at, updated_at";
 
     pub async fn link_by_url(&self, url: &str) -> Result<Option<Link>> {
         let q = format!("SELECT {} FROM links WHERE url = ?", Self::LINK_COLS);
@@ -678,6 +683,18 @@ impl Db {
         sqlx::query("UPDATE links SET audio_file = ?, updated_at = ? WHERE id = ?")
             .bind(file)
             .bind(now_str())
+            .bind(link_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Desa el text parlat (titular + resum) que sintetitza el TTS. Es desa
+    /// encara que la sintesi falli: així el backfill de veu no ha de tornar a
+    /// cridar el LLM.
+    pub async fn set_link_audio_script(&self, link_id: Uuid, script: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE links SET audio_script = ? WHERE id = ?")
+            .bind(script)
             .bind(link_id.to_string())
             .execute(&self.pool)
             .await?;
@@ -884,6 +901,26 @@ impl Db {
         Ok(links)
     }
 
+    /// Ids dels links que ja poden aparèixer a l'overlay i tenen la veu
+    /// pendent (anàlisi profunda amb text i sense MP3, o amb un MP3 antic
+    /// generat quan la veu només llegia el titular i sense `audio_script`).
+    /// És la font del backfill `linkanalyzer voice`; mateixa invariància que
+    /// `latest_done_links`.
+    pub async fn deep_done_ids_pending_voice(&self, limit: i64) -> Result<Vec<Uuid>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM links \
+             WHERE status = 'done' AND deep_status = 'done' \
+               AND deep_summary IS NOT NULL AND trim(deep_summary) != '' \
+               AND (audio_file IS NULL OR trim(audio_file) = '' \
+                    OR audio_script IS NULL OR trim(audio_script) = '') \
+             ORDER BY created_at DESC, updated_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|(id,)| parse_uuid(id)).collect())
+    }
+
     /// Usat pel comando /list del bot Telegram (encara stub).
     #[allow(dead_code)]
     pub async fn links_reported_by(&self, user_id: Uuid, limit: i64) -> Result<Vec<Link>> {
@@ -986,6 +1023,92 @@ mod tests {
             assert_eq!(l.deep_status, DeepStatus::Done);
             assert_ne!(l.deep_summary.as_deref().map(str::trim).unwrap_or(""), "");
         }
+    }
+
+    /// `deep_done_ids_pending_voice` és el candidat del backfill de veu: links
+    /// que poden sortir a l'overlay (deep completa amb text) sense MP3 o amb un
+    /// MP3 antic (sense `audio_script`, que llavors només llegia el titular).
+    #[tokio::test]
+    async fn deep_done_ids_pending_voice_lists_missing_and_legacy_voice() {
+        let db = temp_db().await;
+        let reporter = Uuid::new_v4();
+
+        // Veu completa (MP3 + text parlat): NO.
+        let with_voice = db.create_link("https://ex.com/veu", reporter).await.unwrap();
+        db.set_link_status(with_voice.id, LinkStatus::Done)
+            .await
+            .unwrap();
+        db.update_deep_analysis(with_voice.id, "anàlisi", None)
+            .await
+            .unwrap();
+        db.set_link_audio_file(with_voice.id, Some("veu.mp3"))
+            .await
+            .unwrap();
+        db.set_link_audio_script(with_voice.id, Some("Titular. Resum."))
+            .await
+            .unwrap();
+
+        // Veu antiga (MP3 de només titular, sense audio_script): SÍ (s'actualitza).
+        let legacy = db.create_link("https://ex.com/antiga", reporter).await.unwrap();
+        db.set_link_status(legacy.id, LinkStatus::Done).await.unwrap();
+        db.update_deep_analysis(legacy.id, "anàlisi", None)
+            .await
+            .unwrap();
+        db.set_link_audio_file(legacy.id, Some("antic.mp3"))
+            .await
+            .unwrap();
+
+        // Sense veu: SÍ.
+        let without_voice = db.create_link("https://ex.com/sense", reporter).await.unwrap();
+        db.set_link_status(without_voice.id, LinkStatus::Done)
+            .await
+            .unwrap();
+        db.update_deep_analysis(without_voice.id, "anàlisi", None)
+            .await
+            .unwrap();
+
+        // Deep pendent: no és candidat encara que no tingui veu.
+        let no_deep = db.create_link("https://ex.com/pendent", reporter).await.unwrap();
+        db.set_link_status(no_deep.id, LinkStatus::Done).await.unwrap();
+
+        let mut ids = db.deep_done_ids_pending_voice(50).await.unwrap();
+        ids.sort();
+        let mut expected = vec![without_voice.id, legacy.id];
+        expected.sort();
+        assert_eq!(ids, expected, "veu absent o antiga, mai la completa ni el deep pendent");
+
+        // Un cop actualitzada la veu antiga, deixa de ser candidata.
+        db.set_link_audio_script(legacy.id, Some("Titular. Resum nou."))
+            .await
+            .unwrap();
+        db.set_link_audio_file(without_voice.id, Some("veu2.mp3"))
+            .await
+            .unwrap();
+        db.set_link_audio_script(without_voice.id, Some("Titular. Resum."))
+            .await
+            .unwrap();
+        assert!(db.deep_done_ids_pending_voice(50).await.unwrap().is_empty());
+        // límit 0 -> cap.
+        assert!(db.deep_done_ids_pending_voice(0).await.unwrap().is_empty());
+    }
+
+    /// El text parlat es desa i es recupera amb el link (el backfill el
+    /// reutilitza per no tornar a cridar el LLM).
+    #[tokio::test]
+    async fn audio_script_roundtrips_with_link() {
+        let db = temp_db().await;
+        let reporter = Uuid::new_v4();
+        let l = db.create_link("https://ex.com/a", reporter).await.unwrap();
+        assert!(db.link_by_id(l.id).await.unwrap().unwrap().audio_script.is_none());
+
+        let script = "El mercat puja amb força. Ho fa per la demanda de xips.";
+        db.set_link_audio_script(l.id, Some(script)).await.unwrap();
+        let got = db.link_by_id(l.id).await.unwrap().unwrap();
+        assert_eq!(got.audio_script.as_deref(), Some(script));
+
+        // None el neteja.
+        db.set_link_audio_script(l.id, None).await.unwrap();
+        assert!(db.link_by_id(l.id).await.unwrap().unwrap().audio_script.is_none());
     }
 
     #[tokio::test]

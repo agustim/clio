@@ -68,9 +68,13 @@ fn item(l: &Link) -> Value {
         "sentiment": l.sentiment.as_str(),
         "source": source,
         "image": image_for(l),
-        // MP3 de la veu del titular (si en té). La core el llegeix en veu
-        // alta dins del grup de cards; si buit, salta aquesta notícia.
-        "audio": l.audio_file.as_ref().map(|_| format!("/audio/{}", l.id)),
+        // MP3 de la veu de la notícia (titular + resum parlat). La core el
+        // llegeix en veu alta dins del grup de cards; si buit, salta la notícia.
+        // El `v` (updated_at) evita que el navegador serveixi un MP3 vell si la
+        // veu s'ha regenerat (la resposta /audio porta Cache-Control immutable).
+        "audio": l.audio_file.as_ref().map(|_| {
+            format!("/audio/{}?v={}", l.id, l.updated_at.timestamp())
+        }),
         // Dia i hora de la notícia (quan es va recollir). S'envia com a RFC3339
         // (UTC) i el navegador el mostra en hora local de l'emissió, com el rellotge.
         "date": l.created_at.to_rfc3339(),
@@ -89,8 +93,9 @@ fn image_for(l: &Link) -> Option<String> {
 
 /// Neteja lleugera del text del LLM (markdown -> prosa per a l'overlay): treu
 /// marques de títol/llista/negreta (`#`, `-`, `*`, `>`, `•`), línies buides i
-/// col·lapsa les frases en un sol paràgraf continu.
-fn clean_prose(s: &str) -> String {
+/// col·lapsa les frases en un sol paràgraf continu. També la fa servir la veu
+/// (`voice.rs`) per netejar el text que sintetitza.
+pub(crate) fn clean_prose(s: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for raw in s.lines() {
         let l = raw.trim();
@@ -502,12 +507,25 @@ function renderCards() {
   $('strip').innerHTML = slice.map(cardHtml).join('');
 }
 // Rotació: tota la graella avança de cop, saltant de CARDS en CARDS (no va
-// lliscant d'un en un): cada minut/rotació es veuen X notícies completament noves.
-setInterval(() => { idx = (idx + CARDS) % ITEMS.length; renderCards(); maybeReadGroup(); }, ROTATE);
+// lliscant d'un en un). Mentre la veu llegeix el grup NO es canvia de cards:
+// en acabar la lectura la graella avança, de manera que imatge i so van junts.
+// ROTATE és el temps MÍNIM que es veu un grup; sense veu, rotació per temps.
+let lastAdvance = Date.now();
+function advance(){
+  if (!ITEMS.length) return;
+  lastAdvance = Date.now();
+  idx = (idx + CARDS) % ITEMS.length;
+  renderCards();
+  maybeReadGroup(true);
+}
+setInterval(() => {
+  if (reading || !ITEMS.length) return;       // no canviem res mentre parla
+  if (Date.now() - lastAdvance >= ROTATE) advance();
+}, 1000);
 
-// ---- Veu dels titulars (lectura per grups) + música de fons ----
+// ---- Veu de les notícies (titular + resum de 40-50 paraules) + música ----
 // Música de fons: llarga, en bucle, lliure de drets (el mateix usuari la deixa
-// a public/music.mp3). Baixa de volum mentre es llegeixen els titulars (ducking).
+// a public/music.mp3). Baixa de volum mentre es llegeixen les notícies (ducking).
 const MUSIC = new Audio('/music.mp3');
 MUSIC.loop = true;
 MUSIC.preload = 'auto';
@@ -516,7 +534,6 @@ let musicOn = false;      // cert només quan la música ha arrencat de veritat
 let reading = false;      // cert mentre s'està llegint un grup
 let lastGroupKey = '';    // grup ja llegit (per no repetir-lo si torna seguit)
 let audioQueue = [];      // MPs pendents de llegir en seqüència
-let missingIds = [];      // ids del grup actual que encara no tenen veu (reintent)
 
 // Autoplay robust: Chrome pot rebutjar el primer play() (política d'autoplay
 // amb so). En lloc de rendir-se, ho reintentem cada pocs segons i també ens
@@ -557,7 +574,14 @@ function duckForSpeech(voice){
 const VOICE = new Audio();
 VOICE.preload = 'auto';
 function playQueue(){
-  if (!audioQueue.length){ reading = false; duckForSpeech(false); return; }
+  if (!audioQueue.length){
+    reading = false;
+    duckForSpeech(false);
+    // Veu acabada: si el grup ja ha estat ROTATE segons a la graella, avancem
+    // perquè la propera lectura correspongui a les cards que es veuran.
+    if (Date.now() - lastAdvance >= ROTATE) advance();
+    return;
+  }
   const url = audioQueue.shift();
   reading = true;
   duckForSpeech(true);
@@ -575,37 +599,17 @@ function visibleGroup(){
   return out;
 }
 // Llegeix el grup visible (els que tenen veu; els que no, els saltem). No es
-// torna a llegir el mateix grup seguit. Els ítems sense veu encara es tornen
-// a provar aviat (l'MP3 es genera mentre s'analitza la cua).
+// torna a llegir el mateix grup seguit. La clau inclou si cada card té veu: si
+// el ticker porta un MP3 nou per al grup visible, es llegeix encara que els ids
+// no hagin canviat (no reintentem àudio de cards que ja no es veuen).
 function maybeReadGroup(force){
   if (reading) return; // no interrompem el grup en curs
   const group = visibleGroup();
-  const key = group.map(l => l.id).join(',');
+  const key = group.map(l => l.id + (l.audio ? '+' : '-')).join(',');
   if (!force && key === lastGroupKey) return;
   lastGroupKey = key;
   const urls = group.filter(l => l.audio).map(l => l.audio);
-  missingIds = group.filter(l => !l.audio).map(l => l.id);
   if (urls.length){ audioQueue = urls.slice(); playQueue(); }
-  scheduleMissingRetry();
-}
-let missingTimer = null;
-function scheduleMissingRetry(){
-  if (missingTimer) clearTimeout(missingTimer);
-  if (!missingIds.length) return;
-  missingTimer = setTimeout(() => {
-    missingTimer = null;
-    if (reading) return;
-    // Reintenta els ítems d'aquest grup que encara no tenien veu: potser el
-    // MP3 s'ha generat mentre re-carregàvem el ticker.
-    const ready = missingIds
-      .map(id => ITEMS.find(x => x.id === id))
-      .filter(l => l && l.audio);
-    missingIds = [];
-    if (ready.length){
-      audioQueue = ready.map(l => l.audio).slice();
-      playQueue();
-    }
-  }, 20000);
 }
 
 // ---- Crawl inferior ----
@@ -632,7 +636,11 @@ async function load() {
     const j = await r.json();
     if (j && Array.isArray(j.items) && j.items.length) {
       const same = ITEMS.length && ITEMS[0].id === j.items[0].id;
+      const first = !ITEMS.length;
       ITEMS = j.items;
+      // Primera càrrega: el comptador de rotació arrenca ara (si no, com que la
+      // pàgina pot portar estona oberta, la primera graella passaria de cop).
+      if (first) lastAdvance = Date.now();
       if (idx >= ITEMS.length) idx = 0;
       renderCards();
       maybeReadGroup();
@@ -708,14 +716,27 @@ mod tests {
                 "card i crawl marquen la notícia nova");
         assert!(OVERLAY_HTML.contains("badge-new") && OVERLAY_HTML.contains("card.new"),
                 "la notícia nova té marc i etiqueta NOU");
-        // Veu dels titulars + música de fons: la core llegeix el grup visible
-        // i la música fa ducking mentre parla.
+        // Veu de les notícies + música de fons: la core llegeix el grup visible,
+        // la graella espera que acabi la veu i la música fa ducking mentre parla.
         assert!(OVERLAY_HTML.contains("maybeReadGroup()"),
-                "la rotació re-llança la lectura del grup");
+                "la càrrega del ticker re-llança la lectura del grup");
+        assert!(OVERLAY_HTML.contains("function advance()")
+                && OVERLAY_HTML.contains("maybeReadGroup(true)"),
+                "la rotació avança el grup i en re-llança la lectura");
+        assert!(OVERLAY_HTML.contains("let lastAdvance = Date.now();"),
+                "la rotació recorda quan es va canviar de grup");
+        assert!(OVERLAY_HTML.contains("if (reading || !ITEMS.length) return;"),
+                "mentre la veu parla (o no hi ha dades) no es canvia la graella");
+        assert!(OVERLAY_HTML.contains("if (Date.now() - lastAdvance >= ROTATE) advance();"),
+                "en acabar la lectura, la graella avança si ja toca");
+        assert!(!OVERLAY_HTML.contains("scheduleMissingRetry"),
+                "no es reintenta àudio de cards que ja no es veuen (trencaria la sincronia)");
+        assert!(OVERLAY_HTML.contains("l.id + (l.audio ? '+' : '-')"),
+                "la clau del grup té en compte si les cards ja tenen veu");
         assert!(OVERLAY_HTML.contains("/music.mp3"),
                 "la música de fons ve de public/music.mp3");
         assert!(OVERLAY_HTML.contains("MUSIC_DUCK") && OVERLAY_HTML.contains("duckForSpeech"),
-                "ducking de la música mentre es llegeixen titulars");
+                "ducking de la música mentre es llegeixen notícies");
         assert!(OVERLAY_HTML.contains("{{MUSIC_VOL}}")
                 && OVERLAY_HTML.contains("{{MUSIC_DUCK}}")
                 && OVERLAY_HTML.contains("{{READ_GAP}}"),
@@ -743,6 +764,7 @@ mod tests {
             image_url: None,
             image_file: None,
             audio_file: Some("t.mp3".into()),
+            audio_script: None,
             embedding: None,
             embed_scale: None,
             created_at: chrono::DateTime::parse_from_rfc3339("2025-08-27T09:48:00Z")
@@ -753,8 +775,12 @@ mod tests {
         let v = item(&link);
         assert_eq!(v["date"], "2025-08-27T09:48:00+00:00");
         assert_eq!(v["link_type"], "article");
-        // Amb audio_file, la card porta la URL del MP3 de la veu.
-        assert_eq!(v["audio"], format!("/audio/{}", link.id));
+        // Amb audio_file, la card porta la URL del MP3 de la veu, amb el
+        // `updated_at` com a versió (cache-busting si la veu es regenera).
+        assert_eq!(
+            v["audio"],
+            format!("/audio/{}?v={}", link.id, link.updated_at.timestamp())
+        );
     }
 
     /// Sense audio_file, la card no ofereix veu (camp buit).
@@ -778,6 +804,7 @@ mod tests {
             image_url: None,
             image_file: None,
             audio_file: None,
+            audio_script: None,
             embedding: None,
             embed_scale: None,
             created_at: chrono::Utc::now(),
@@ -857,6 +884,7 @@ mod tests {
             image_url: image_url.map(String::from),
             image_file: image_file.map(String::from),
             audio_file: None,
+            audio_script: None,
             embedding: None,
             embed_scale: None,
             created_at: chrono::Utc::now(),

@@ -192,13 +192,20 @@ pub struct Voice {
 pub async fn synthesize(
     text: &str,
     voice: &str,
-    _lang: &str,
+    lang: &str,
     rate: &str,
 ) -> Result<Vec<u8>, VoiceError> {
     ensure_tls();
 
     let cleaned = remove_incompatible_characters(text);
     let escaped = xml_escape(&cleaned);
+    // La llengua de l'SSML ha de coincidir amb la de la veu: Microsoft tanca
+    // la connexio (reset) si, per exemple, es demana una veu ca-ES amb
+    // xml:lang="en-US". Buit => en-US, com abans.
+    let lang = match lang.trim() {
+        "" => "en-US",
+        l => l,
+    };
     let conn_id = Uuid::new_v4().simple().to_string();
     let muid = Uuid::new_v4().simple().to_string();
     let gec = gec::generate_sec_ms_gec_v2();
@@ -240,11 +247,7 @@ pub async fn synthesize(
 
     // 2) SSML amb la veu i el text.
     let request_id = Uuid::new_v4().simple().to_string();
-    let ssml = format!(
-        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>\
-         <voice name='{voice}'><prosody pitch='+0Hz' rate='{rate}' volume='+0%'>\
-         {escaped}</prosody></voice></speak>"
-    );
+    let ssml = ssml(voice, lang, rate, &escaped);
     // Nota: el "Z" final de X-Timestamp es un bug de Microsoft; el mantindrem com el port.
     let ssml_msg = format!(
         "X-RequestId:{request_id}\r\n\
@@ -315,4 +318,33 @@ pub async fn synthesize(
         ));
     }
     Ok(audio)
+}
+
+/// Construeix l'SSML del servei. `lang` ha de ser la llengua de la veu (si no
+/// coincideixen, Microsoft tanca la connexio): és la peça que va fallar quan
+/// es va començar a rebutjar `ca-ES` amb `xml:lang='en-US'`.
+fn ssml(voice: &str, lang: &str, rate: &str, escaped_text: &str) -> String {
+    format!(
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' \
+         xml:lang='{lang}'><voice name='{voice}'>\
+         <prosody pitch='+0Hz' rate='{rate}' volume='+0%'>{escaped_text}</prosody>\
+         </voice></speak>"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L'SSML ha de portar la llengua de la veu (no un `en-US` fix): Edge
+    /// tanca la connexio si no coincideixen.
+    #[test]
+    fn ssml_uses_the_voice_language() {
+        let s = ssml("ca-ES-JoanaNeural", "ca-ES", "+0%", "Hola &amp; adéu");
+        assert!(s.contains("xml:lang='ca-ES'"), "llengua de la veu: {s}");
+        assert!(s.contains("name='ca-ES-JoanaNeural'"), "veu: {s}");
+        assert!(s.contains("Hola &amp; adéu"), "text ja escapat: {s}");
+        assert!(s.starts_with("<speak"), "SSML valid: {s}");
+        assert!(!s.contains("en-US"), "no ha de forçar en-US: {s}");
+    }
 }

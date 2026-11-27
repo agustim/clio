@@ -60,7 +60,8 @@ impl EmbedConfig {
 /// l'overlay del directe la llegeixi (vegeu el crate `clio-voice`).
 #[derive(Debug, Clone)]
 pub struct TtsConfig {
-    /// TTS_ENABLED=1 -> es generen MP3 dels titulars en analitzar la cua.
+    /// TTS_ENABLED=1 -> es genera un MP3 per notícia en acabar l'anàlisi
+    /// profunda (que és quan la notícia pot aparèixer a l'overlay).
     pub enabled: bool,
     /// Veu Edge (per defecte ca-ES-JoanaNeural; ca-ES-AlbaNeural es l'altra ca).
     pub voice: String,
@@ -80,6 +81,13 @@ pub struct TtsConfig {
     pub timeout_secs: u64,
     /// Només per a tipus noticiosos (News|Article|Blog|Video). 0 = tots.
     pub only_news: bool,
+    /// Paraules del resum parlat que acompanya el titular (TTS_SCRIPT_WORDS).
+    /// El LLM n'ha d'escriure ~aquestes; l'extracció automàtica de reserva
+    /// també les fa servir de sostre.
+    pub script_words: usize,
+    /// Espaiat mínim entre connexions de sintesi (TTS_MIN_GAP_MS). Edge tanca
+    /// connexions si se'n fan diverses seguides des de la mateixa IP.
+    pub min_gap_ms: u64,
 }
 
 impl TtsConfig {
@@ -187,6 +195,23 @@ pub struct Config {
     pub overlay_read_gap_ms: u64,
 }
 
+/// Paraules per defecte del resum parlat de la veu (TTS_SCRIPT_WORDS).
+const DEFAULT_SCRIPT_WORDS: usize = 45;
+
+/// Valida `TTS_SCRIPT_WORDS`: 20-80 paraules. Un resum més curt no explica la
+/// notícia i un de més llarg allarga massa el directe.
+fn parse_script_words(raw: &str) -> Result<usize> {
+    let n: usize = raw
+        .parse()
+        .map_err(|_| AppError::Config("TTS_SCRIPT_WORDS invalid".into()))?;
+    if !(20..=80).contains(&n) {
+        return Err(AppError::Config(
+            "TTS_SCRIPT_WORDS fora de rang (20-80 paraules)".into(),
+        ));
+    }
+    Ok(n)
+}
+
 fn opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
@@ -286,6 +311,13 @@ impl Config {
             .parse()
             .map_err(|_| AppError::Config("TTS_TIMEOUT_SECS invalid".into()))?;
         let tts_only_news = get("TTS_ONLY_NEWS", "1") != "0";
+        let tts_script_words = parse_script_words(&get(
+            "TTS_SCRIPT_WORDS",
+            &DEFAULT_SCRIPT_WORDS.to_string(),
+        ))?;
+        let tts_min_gap_ms: u64 = get("TTS_MIN_GAP_MS", "5000")
+            .parse()
+            .map_err(|_| AppError::Config("TTS_MIN_GAP_MS invalid".into()))?;
 
         // LLM de chat.
         let llm_provider = get("LLM_PROVIDER", "none");
@@ -348,6 +380,8 @@ impl Config {
                 dir: get("TTS_DIR", "data/tts"),
                 timeout_secs: tts_timeout_secs,
                 only_news: tts_only_news,
+                script_words: tts_script_words,
+                min_gap_ms: tts_min_gap_ms,
             },
             max_link_size_bytes: max_mb * 1024 * 1024,
             summary_max_words,
@@ -398,4 +432,33 @@ fn parse_categories(raw: &str) -> Vec<(String, Vec<String>)> {
             (!name.is_empty() && !users.is_empty()).then(|| (name.to_string(), users))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TTS_SCRIPT_WORDS` configura la llargada del resum parlat: per defecte
+    /// 45 paraules, valor vàlid dins 20-80 i error de config fora de rang.
+    /// Es prova el validador pur (sense tocar l'entorn: altres tests llegeixen
+    /// la configuració en paral·lel).
+    #[test]
+    fn tts_script_words_defaults_and_validates_range() {
+        assert_eq!(DEFAULT_SCRIPT_WORDS, 45, "per defecte 45 paraules");
+        assert_eq!(
+            parse_script_words(&DEFAULT_SCRIPT_WORDS.to_string()).unwrap(),
+            45
+        );
+        assert_eq!(parse_script_words("20").unwrap(), 20);
+        assert_eq!(parse_script_words("80").unwrap(), 80);
+        assert!(
+            parse_script_words("19").is_err(),
+            "menys de 20 paraules no és un resum útil"
+        );
+        assert!(
+            parse_script_words("81").is_err(),
+            "més de 80 paraules allarga massa el directe"
+        );
+        assert!(parse_script_words("no").is_err(), "valor no numèric");
+    }
 }

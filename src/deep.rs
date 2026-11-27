@@ -52,6 +52,11 @@ pub async fn process_deep(
 
     match result {
         Ok((summary, stats)) => {
+            // Veu de la notícia (best-effort): titular + resum de 40-50 paraules
+            // (TTS_SCRIPT_WORDS). Es fa ABANS de marcar el deep com a `done`
+            // perquè la card no aparegui a l'overlay sense veu; si el LLM o la
+            // sintesi fallen, el deep continua igualment.
+            crate::voice::prepare(db, cfg, llm, &link, &summary).await;
             db.update_deep_analysis(link_id, &summary, stats.as_ref()).await?;
             tracing::info!(%link_id, "deep pass done");
             Ok(())
@@ -1007,6 +1012,7 @@ mod tests {
             image_url: None,
             image_file: None,
             audio_file: None,
+            audio_script: None,
             embedding: None,
             embed_scale: None,
             created_at: now,
